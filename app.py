@@ -3,7 +3,7 @@
 Ad Intelligence Scraper — Railway hosted version
 """
 
-import json, time, threading, uuid, os, urllib.request
+import json, time, threading, uuid, os, urllib.request, zipfile, io
 from flask import Flask, request, jsonify, Response, render_template_string
 
 app = Flask(__name__)
@@ -186,6 +186,8 @@ def build_viewer(job_id, brand, country, ads):
 header{{background:{COLOR};color:white;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}}
 header h1{{font-size:18px}}header a{{color:rgba(255,255,255,.7);font-size:12px;text-decoration:none}}
 header a:hover{{color:white}}
+.dl-btn{{background:rgba(255,255,255,.2);color:white;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:bold;text-decoration:none;white-space:nowrap}}
+.dl-btn:hover{{background:rgba(255,255,255,.35);color:white}}
 .stats{{display:flex;gap:12px;font-size:12px}}
 .stat{{background:rgba(255,255,255,.15);padding:5px 12px;border-radius:20px;text-align:center}}
 .stat strong{{display:block;font-size:18px}}
@@ -223,9 +225,12 @@ header a:hover{{color:white}}
     <h1>{brand} — Ad Intelligence</h1>
     <a href="/">← New scrape</a>
   </div>
-  <div class="stats">
-    <div class="stat"><strong>{len(ads)}</strong>total</div>
-    <div class="stat"><strong>{active}</strong>active</div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <a href="/download/{job_id}" class="dl-btn">⬇ Download All</a>
+    <div class="stats">
+      <div class="stat"><strong>{len(ads)}</strong>total</div>
+      <div class="stat"><strong>{active}</strong>active</div>
+    </div>
   </div>
 </header>
 <div class="filters">
@@ -315,7 +320,7 @@ def start():
             searches.insert(0, [netloc])
 
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None}
+    jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None, "config": {"brand": brand}}
 
     threading.Thread(target=run_job, args=(job_id, brand, country, searches), daemon=True).start()
 
@@ -332,6 +337,21 @@ def viewer(job_id):
     if not job or not job.get("html"):
         return "Job not found or still running.", 404
     return job["html"]
+
+@app.route("/download/<job_id>")
+def download_zip(job_id):
+    job = jobs.get(job_id)
+    if not job or not job.get("media"):
+        return "No creatives found.", 404
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, (data, _) in job["media"].items():
+            zf.writestr(filename, data)
+    buf.seek(0)
+    brand = job.get("config", {}).get("brand", "ads")
+    return Response(buf.read(),
+        mimetype="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{brand}_creatives.zip"'})
 
 @app.route("/media/<job_id>/<filename>")
 def media(job_id, filename):
