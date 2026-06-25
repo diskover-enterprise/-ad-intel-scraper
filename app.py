@@ -271,6 +271,8 @@ input:focus,select:focus{border-color:#1877f2}
   <form method="POST" action="/start">
     <label>Brand Name</label>
     <input name="brand" placeholder="e.g. GLPure" required>
+    <label>Brand Website <span style="font-weight:normal;color:#aaa">(optional — domain auto-added to search)</span></label>
+    <input name="domain" placeholder="e.g. https://get-glpure.com/en-GB">
     <label>Country</label>
     <select name="country">
       COUNTRY_OPTIONS
@@ -300,8 +302,17 @@ def home():
 def start():
     brand        = request.form.get("brand", "Brand").strip()
     country      = request.form.get("country", "GB")
+    domain_input = request.form.get("domain", "").strip()
     searches_raw = request.form.getlist("search[]")
     searches     = [[q.strip() for q in s.split(",") if q.strip()] for s in searches_raw if s.strip()]
+
+    # extract domain from URL and prepend as a search group
+    if domain_input:
+        from urllib.parse import urlparse
+        parsed  = urlparse(domain_input if "://" in domain_input else "https://" + domain_input)
+        netloc  = parsed.netloc
+        if netloc:
+            searches.insert(0, [netloc])
 
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None}
