@@ -276,6 +276,7 @@ input:focus,select:focus{border-color:#1877f2}
   <form method="POST" action="/start">
     <label>Brand Name</label>
     <input name="brand" placeholder="e.g. GLPure" required>
+    <small style="color:#aaa;font-size:11px">You can use just the Brand Website field — search terms are optional</small>
     <label>Brand Website <span style="font-weight:normal;color:#aaa">(optional — domain auto-added to search)</span></label>
     <input name="domain" placeholder="e.g. https://get-glpure.com/en-GB">
     <label>Country</label>
@@ -284,7 +285,7 @@ input:focus,select:focus{border-color:#1877f2}
     </select>
     <label>Search Terms <span style="font-weight:normal;color:#aaa">(one group per row, comma-separated)</span></label>
     <div id="searches">
-      <div class="search-row"><input name="search[]" placeholder="e.g. glpure, gl pure" required><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
+      <div class="search-row"><input name="search[]" placeholder="e.g. glpure, gl pure"><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
       <div class="search-row"><input name="search[]" placeholder="e.g. get-glpure.com"><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
     </div>
     <button type="button" class="add-btn" onclick="addRow()">+ Add search group</button>
