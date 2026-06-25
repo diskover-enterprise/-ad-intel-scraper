@@ -33,12 +33,19 @@ def api_get(path):
         return json.loads(r.read())
 
 def fetch_url(url):
+    # Route through Apify proxy (residential IPs) to bypass Facebook CDN blocking
+    proxy_url = f"http://auto:{TOKEN}@proxy.apify.com:8000"
+    proxy_handler = urllib.request.ProxyHandler({
+        "http":  proxy_url,
+        "https": proxy_url
+    })
+    opener = urllib.request.build_opener(proxy_handler)
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
         "Referer":    "https://www.facebook.com/"
     })
     try:
-        with urllib.request.urlopen(req, timeout=45) as r:
+        with opener.open(req, timeout=45) as r:
             return r.read(), r.headers.get("Content-Type", "application/octet-stream")
     except:
         return None, None
