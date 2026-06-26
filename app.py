@@ -50,6 +50,9 @@ def run_job(job_id, brand, country, searches, fb_cookies=None):
             payload = {"searchQueries": queries, "country": country, "maxAds": 30}
             if fb_cookies:
                 payload["fbLoginCookies"] = fb_cookies
+                log(f"   🍪 Sending {len(fb_cookies)} cookies to Apify")
+            else:
+                log(f"   🍪 No cookies loaded")
             run    = api_post(f"acts/{ACTOR}/runs", payload)
             run_id = run["data"]["id"]
             log(f"   Run started...")
