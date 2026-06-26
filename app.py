@@ -220,13 +220,15 @@ def run_job(job_id, platform, brand, country, searches, domain):
         # Build TikTok Ad Library search URLs
         keywords = [brand] + [q for queries in searches for q in queries]
         keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
+        # TikTok requires start_time/end_time timestamps in milliseconds
+        now_ms   = int(time.time() * 1000)
+        start_ms = now_ms - (90 * 24 * 3600 * 1000)  # last 90 days
         start_urls = []
         for kw in keywords:
-            # keyword search (query_type=1) casts a wider net than adv_name (query_type=2)
-            # region=all avoids country restrictions that return 0 results
             start_urls.append({"url":
                 f"https://library.tiktok.com/ads?region=all"
-                f"&keyword={urlquote(kw)}&query_type=1&sort_type=create_time,desc"
+                f"&start_time={start_ms}&end_time={now_ms}"
+                f"&keyword={urlquote(kw)}&query_type=1&sort_type=last_shown_date,desc"
             })
         log(f"🔍 TikTok Ad Library: {[u['url'] for u in start_urls]}")
         try:
