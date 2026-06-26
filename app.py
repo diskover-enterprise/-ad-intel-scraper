@@ -16,7 +16,7 @@ BASE  = "https://api.apify.com/v2"
 
 jobs = {}
 
-COUNTRIES = ["GB","DE","FR","SE","NO","DK","FI","IT","ES","NL","BE","AT","CH","US","AU","CA"]
+COUNTRIES = ["","GB","DE","FR","SE","NO","DK","FI","IT","ES","NL","BE","AT","CH","US","AU","CA"]
 
 PLATFORMS = {
     "meta":   {"label": "📘 Meta (Facebook/Instagram)", "color": "#1877f2",
@@ -475,7 +475,10 @@ PLATFORM_OPTIONS = "\n".join(
     f'<option value="{k}">{v["label"]}</option>'
     for k, v in PLATFORMS.items()
 )
-COUNTRY_OPTIONS = "\n".join(f'<option value="{c}">{c}</option>' for c in COUNTRIES)
+COUNTRY_OPTIONS = "\n".join(
+    f'<option value="{c}">{"🌍 All Regions" if c == "" else c}</option>'
+    for c in COUNTRIES
+)
 
 HOME = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Ad Intel Scraper</title>
