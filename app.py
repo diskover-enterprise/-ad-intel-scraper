@@ -36,7 +36,7 @@ def safe(s):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))
 
 # ── scrape worker ─────────────────────────────────────────────────────────────
-def run_job(job_id, brand, country, searches):
+def run_job(job_id, brand, country, searches, fb_cookies=None):
     job = jobs[job_id]
 
     def log(msg):
@@ -47,7 +47,10 @@ def run_job(job_id, brand, country, searches):
     for i, queries in enumerate(searches):
         log(f"🔍 Search {i+1}/{len(searches)}: {queries}")
         try:
-            run    = api_post(f"acts/{ACTOR}/runs", {"searchQueries": queries, "country": country, "maxAds": 30})
+            payload = {"searchQueries": queries, "country": country, "maxAds": 30}
+            if fb_cookies:
+                payload["fbLoginCookies"] = fb_cookies
+            run    = api_post(f"acts/{ACTOR}/runs", payload)
             run_id = run["data"]["id"]
             log(f"   Run started...")
             for _ in range(80):
@@ -81,11 +84,12 @@ def run_job(job_id, brand, country, searches):
     if unique:
         first = unique[0]
         snap = first.get("snapshot") or {}
-        log(f"   🔎 imageUrls: {first.get('imageUrls')}")
-        log(f"   🔎 videoUrls: {first.get('videoUrls')}")
-        log(f"   🔎 videoPreviewUrls: {first.get('videoPreviewUrls')}")
-        log(f"   🔎 displayFormat: {first.get('displayFormat')}")
-        log(f"   🔎 gatedType: {first.get('gatedType')}")
+        gated = first.get('gatedType')
+        img_count = len(first.get('imageUrls') or [])
+        vid_count = len(first.get('videoUrls') or [])
+        log(f"   🔎 gatedType: {gated} | imageUrls: {img_count} | videoUrls: {vid_count}")
+        if gated == 'LOGGED_OUT':
+            log(f"   ⚠️ Meta is blocking images — FB_COOKIES env var may be missing or expired")
 
     log("🖼️  Creatives load directly in browser — use 'Save Creatives' to view & save them")
 
@@ -294,6 +298,9 @@ input:focus,select:focus{border-color:#1877f2}
     </div>
     <button type="button" class="add-btn" onclick="addRow()">+ Add search group</button>
     <p class="hint">Tip: brand name, domain, and category terms give the best coverage</p>
+    <label>Facebook Cookies <span style="font-weight:normal;color:#aaa">(optional — paste JSON to unlock ad images)</span></label>
+    <textarea name="fb_cookies" placeholder='Paste cookies JSON from EditThisCookie Chrome extension' style="width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:7px;font-size:12px;font-family:monospace;height:80px;resize:vertical;outline:none"></textarea>
+    <p class="hint">Install <a href="https://chrome.google.com/webstore/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg" target="_blank" style="color:#1877f2">EditThisCookie</a> → log into Facebook → visit facebook.com → click the extension → Export → paste here</p>
     <button type="submit" class="submit-btn">Start Scrape →</button>
   </form>
 </div>
@@ -327,7 +334,19 @@ def start():
     job_id = str(uuid.uuid4())[:8]
     jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None, "config": {"brand": brand}, "_cdn_urls": []}
 
-    threading.Thread(target=run_job, args=(job_id, brand, country, searches), daemon=True).start()
+    # parse facebook cookies — form field overrides env var
+    fb_cookies = None
+    cookies_raw = request.form.get("fb_cookies", "").strip()
+    if not cookies_raw:
+        cookies_raw = os.environ.get("FB_COOKIES", "").strip()
+    if cookies_raw:
+        try:
+            import json as _j
+            fb_cookies = _j.loads(cookies_raw)
+        except:
+            pass  # invalid JSON — run without cookies
+
+    threading.Thread(target=run_job, args=(job_id, brand, country, searches, fb_cookies), daemon=True).start()
 
     return render_template_string(PROGRESS_HTML, job_id=job_id, brand=brand)
 
