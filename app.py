@@ -261,7 +261,7 @@ def run_job(job_id, platform, brand, country, searches, domain):
         actor = PLATFORMS["tiktok"]["actor"]
         # data_xplorer actor supports "all" or any country code globally
         tiktok_region = country if country else "all"
-        keywords = [brand] + [q for queries in searches for q in queries]
+        keywords = [q for queries in searches for q in queries]
         keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
         log(f"🔍 TikTok Ad Library: query={keywords} region={tiktok_region}")
         for kw in keywords:
