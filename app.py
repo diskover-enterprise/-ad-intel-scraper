@@ -302,13 +302,24 @@ def run_job(job_id, platform, brand, country, searches, domain):
     log("🖼️  Building viewer...")
 
     for ad in unique:
-        imgs, vids = extract_urls(ad, platform)
-        ad["_imgs_cdn"] = imgs
-        ad["_vids_cdn"] = vids
+        try:
+            imgs, vids = extract_urls(ad, platform)
+            ad["_imgs_cdn"] = imgs
+            ad["_vids_cdn"] = vids
+        except Exception as e:
+            ad["_imgs_cdn"] = []
+            ad["_vids_cdn"] = []
+            log(f"   ⚠ extract_urls error: {e}")
 
-    job["html"]   = build_viewer(job_id, brand, platform, country, unique)
-    job["status"] = "done"
-    log("✅ Done!")
+    try:
+        job["html"]   = build_viewer(job_id, brand, platform, country, unique)
+        job["status"] = "done"
+        log("✅ Done!")
+    except Exception as e:
+        import traceback
+        job["status"] = "error"
+        log(f"❌ build_viewer crashed: {e}")
+        log(traceback.format_exc())
 
 
 # ── Viewer builder ────────────────────────────────────────────────────────────
