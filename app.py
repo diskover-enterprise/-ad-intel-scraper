@@ -1,21 +1,31 @@
 #!/usr/bin/env python3
 """
 Ad Intelligence Scraper — Railway hosted version
+Supports: Meta, Google, TikTok, LinkedIn
 """
 
 import json, time, threading, uuid, urllib.request, os
+from urllib.parse import urlparse, quote as urlquote
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, Response, render_template_string
 
 app = Flask(__name__)
 
-TOKEN  = os.environ.get("APIFY_TOKEN", "apify_api_EOWdJTlP8HioILrGOSXC2TRA1bQV7E1vwt0z")
-ACTOR  = "automation-lab~facebook-ads-library"
-BASE   = "https://api.apify.com/v2"
+TOKEN = os.environ.get("APIFY_TOKEN", "apify_api_EOWdJTlP8HioILrGOSXC2TRA1bQV7E1vwt0z")
+BASE  = "https://api.apify.com/v2"
 
-# in-memory job store: {job_id: {status, log, media, html}}
 jobs = {}
 
 COUNTRIES = ["GB","DE","FR","SE","NO","DK","FI","IT","ES","NL","BE","AT","CH","US","AU","CA"]
+
+PLATFORMS = {
+    "meta":   {"label": "📘 Meta (Facebook/Instagram)", "color": "#1877f2",
+               "actor": "automation-lab~facebook-ads-library"},
+    "google": {"label": "🔵 Google Ads Transparency",   "color": "#4285F4",
+               "actor": "automation-lab~google-ads-scraper"},
+    "tiktok": {"label": "⬛ TikTok Ad Library",         "color": "#010101",
+               "actor": "silva95gustavo~tiktok-ads-scraper"},
+}
 
 # ── Apify helpers ─────────────────────────────────────────────────────────────
 def api_post(path, payload):
@@ -32,140 +42,294 @@ def api_get(path):
     with urllib.request.urlopen(url, timeout=60) as r:
         return json.loads(r.read())
 
-def safe(s):
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))
+def wait_for_run(run_id, log):
+    status = "UNKNOWN"
+    for _ in range(80):
+        time.sleep(5)
+        s      = api_get(f"actor-runs/{run_id}")
+        status = s["data"]["status"]
+        if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+            break
+    if status != "SUCCEEDED":
+        log(f"   ✗ {status}")
+        return []
+    dsid  = s["data"]["defaultDatasetId"]
+    items = api_get(f"datasets/{dsid}/items?limit=200&clean=true")
+    return items if isinstance(items, list) else items.get("data", {}).get("items", [])
 
-# ── scrape worker ─────────────────────────────────────────────────────────────
-def run_job(job_id, brand, country, searches):
+# ── URL extraction per platform ───────────────────────────────────────────────
+def extract_urls(ad, platform):
+    imgs, vids = [], []
+
+    if platform == "meta":
+        snap = ad.get("snapshot") or {}
+        for u in (ad.get("imageUrls") or []):
+            if u: imgs.append(u)
+        for u in (ad.get("videoUrls") or []):
+            if u: vids.append(u)
+        for obj in list(snap.get("images") or []) + list(snap.get("cards") or []):
+            u = obj.get("resizedImageUrl") or obj.get("originalImageUrl")
+            if u and u not in imgs: imgs.append(u)
+        for obj in (snap.get("videos") or []):
+            u = obj.get("videoUrl") or obj.get("videoHdUrl")
+            if u and u not in vids: vids.append(u)
+
+    elif platform == "google":
+        for v in (ad.get("variations") or []):
+            img = v.get("imageUrl")
+            vid = v.get("videoUrl")
+            if img and img not in imgs: imgs.append(img)
+            if vid and vid not in vids: vids.append(vid)
+        preview = ad.get("previewUrl")
+        if preview and preview not in imgs: imgs.append(preview)
+
+    elif platform == "tiktok":
+        for v in (ad.get("videos") or []):
+            vid = v.get("url")
+            cover = v.get("coverImageUrl")
+            if vid and vid not in vids: vids.append(vid)
+            if cover and cover not in imgs: imgs.append(cover)
+        for u in (ad.get("imageUrls") or []):
+            if u and u not in imgs: imgs.append(u)
+
+    return imgs, vids
+
+# ── Normalize ad fields per platform ─────────────────────────────────────────
+def normalize_ad(ad, platform):
+    n = {}
+    if platform == "meta":
+        n["name"]   = ad.get("pageName", "Unknown")
+        n["status"] = "ACTIVE" if ad.get("isActive") else "INACTIVE"
+        n["date"]   = ad.get("startDate", "")
+        n["body"]   = ad.get("bodyText", "")
+        n["title"]  = ad.get("title", "")
+        n["cta"]    = ad.get("ctaText", "")
+        n["landing"]= ad.get("linkUrl", "#")
+        n["lib_url"]= ad.get("adLibraryUrl", "#")
+        n["plats"]  = " · ".join(p.replace("AUDIENCE_NETWORK","AN")
+            .replace("FACEBOOK","FB").replace("INSTAGRAM","IG").replace("MESSENGER","Msg")
+            for p in (ad.get("platforms") or []))
+        n["variants"] = ad.get("collationCount", 0)
+        n["impressions"] = ""
+
+    elif platform == "google":
+        n["name"]   = ad.get("advertiserName", "Unknown")
+        first = ad.get("firstShown", "")
+        last  = ad.get("lastShown", "")
+        try:
+            last_dt = datetime.strptime(last, "%Y-%m-%d")
+            n["status"] = "ACTIVE" if (datetime.now() - last_dt).days <= 30 else "INACTIVE"
+        except:
+            n["status"] = "UNKNOWN"
+        n["date"]   = f"{first} – {last}" if first and last else first or last
+        variations  = ad.get("variations") or []
+        fv          = variations[0] if variations else {}
+        n["body"]   = fv.get("description", "")
+        n["title"]  = fv.get("headline", "") or fv.get("title", "")
+        n["cta"]    = fv.get("cta", "")
+        n["landing"]= fv.get("clickUrl", "#")
+        n["lib_url"]= ad.get("adLibraryUrl", "#")
+        n["plats"]  = "Google"
+        n["variants"] = len(variations)
+        n["impressions"] = ""
+
+    elif platform == "tiktok":
+        n["name"]   = ad.get("advertiserName") or ad.get("adName") or "Unknown"
+        n["status"] = "ACTIVE"
+        n["date"]   = ""
+        n["body"]   = ""
+        n["title"]  = n["name"]
+        n["cta"]    = ""
+        n["landing"]= "#"
+        n["lib_url"]= ad.get("startUrl", "#")
+        n["plats"]  = "TikTok"
+        n["variants"] = 0
+        imp = ad.get("impressions") or {}
+        lo  = imp.get("lowerBound", "")
+        hi  = imp.get("upperBound", "")
+        n["impressions"] = f"{lo:,}–{hi:,}" if lo and hi else ""
+        regions = ad.get("regionStats") or []
+        if regions:
+            n["plats"] = "TikTok · " + ", ".join(r.get("regionCode","") for r in regions[:4])
+
+    return n
+
+# ── Scrape worker ─────────────────────────────────────────────────────────────
+def run_job(job_id, platform, brand, country, searches, domain):
     job = jobs[job_id]
-
-    def log(msg):
-        job["log"].append(msg)
+    def log(msg): job["log"].append(msg)
 
     all_ads = []
 
-    for i, queries in enumerate(searches):
-        log(f"🔍 Search {i+1}/{len(searches)}: {queries}")
+    # ── Meta ──────────────────────────────────────────────────────────────────
+    if platform == "meta":
+        actor = PLATFORMS["meta"]["actor"]
+        for i, queries in enumerate(searches):
+            log(f"🔍 Search {i+1}/{len(searches)}: {queries}")
+            try:
+                run    = api_post(f"acts/{actor}/runs",
+                                  {"searchQueries": queries, "country": country, "maxAds": 60})
+                run_id = run["data"]["id"]
+                log(f"   Run started...")
+                ads = wait_for_run(run_id, log)
+                log(f"   ✓ {len(ads)} ads found")
+                all_ads.extend(ads)
+            except Exception as e:
+                log(f"   ✗ Error: {e}")
+
+    # ── Google ────────────────────────────────────────────────────────────────
+    elif platform == "google":
+        actor      = PLATFORMS["google"]["actor"]
+        all_terms  = [q for queries in searches for q in queries]
+        payload    = {"maxAds": 100}
+        if all_terms:
+            payload["searchTerms"] = all_terms
+        if domain:
+            payload["domains"] = [domain]
+        if country:
+            payload["region"] = country
+        log(f"🔍 Google Ads search: terms={all_terms} domain={domain} region={country}")
         try:
-            run    = api_post(f"acts/{ACTOR}/runs", {"searchQueries": queries, "country": country, "maxAds": 60})
+            run    = api_post(f"acts/{actor}/runs", payload)
             run_id = run["data"]["id"]
             log(f"   Run started...")
-            for _ in range(80):
-                time.sleep(5)
-                s      = api_get(f"actor-runs/{run_id}")
-                status = s["data"]["status"]
-                if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-                    break
-            if status != "SUCCEEDED":
-                log(f"   ✗ {status}")
-                continue
-            dsid  = s["data"]["defaultDatasetId"]
-            items = api_get(f"datasets/{dsid}/items?limit=100&clean=true")
-            ads   = items if isinstance(items, list) else items.get("data", {}).get("items", [])
+            ads = wait_for_run(run_id, log)
             log(f"   ✓ {len(ads)} ads found")
             all_ads.extend(ads)
         except Exception as e:
             log(f"   ✗ Error: {e}")
 
-    # deduplicate
+    # ── TikTok ────────────────────────────────────────────────────────────────
+    elif platform == "tiktok":
+        actor = PLATFORMS["tiktok"]["actor"]
+        # Build TikTok Ad Library search URLs
+        keywords = [brand] + [q for queries in searches for q in queries]
+        keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
+        region   = country if country else "all"
+        start_urls = []
+        for kw in keywords:
+            start_urls.append({"url":
+                f"https://library.tiktok.com/ads?region={region}"
+                f"&adv_name={urlquote(kw)}&query_type=2&sort_type=create_time,desc"
+            })
+        log(f"🔍 TikTok Ad Library: {[u['url'] for u in start_urls]}")
+        try:
+            run    = api_post(f"acts/{actor}/runs",
+                              {"startUrls": start_urls, "resultsLimit": 60})
+            run_id = run["data"]["id"]
+            log(f"   Run started...")
+            ads = wait_for_run(run_id, log)
+            log(f"   ✓ {len(ads)} ads found")
+            all_ads.extend(ads)
+        except Exception as e:
+            log(f"   ✗ Error: {e}")
+
+    # ── Deduplicate ───────────────────────────────────────────────────────────
     seen, unique = set(), []
     for ad in all_ads:
-        aid = ad.get("adArchiveId") or str(ad)
+        if platform == "meta":
+            aid = ad.get("adArchiveId") or str(id(ad))
+        elif platform == "google":
+            aid = ad.get("creativeId") or ad.get("adLibraryUrl") or str(id(ad))
+        elif platform == "tiktok":
+            aid = ad.get("adId") or str(id(ad))
+        else:
+            aid = str(id(ad))
         if aid not in seen:
             seen.add(aid)
             unique.append(ad)
 
     log(f"📊 {len(unique)} unique ads total")
-
     log("🖼️  Building viewer...")
 
-    # collect all CDN URLs — check both top-level and snapshot fields
-    def extract_urls(ad):
-        imgs, vids = [], []
-        snap = ad.get("snapshot") or {}
-        # top-level lists
-        for u in (ad.get("imageUrls") or []):
-            if u: imgs.append(u)
-        for u in (ad.get("videoUrls") or []):
-            if u: vids.append(u)
-        # snapshot.images / snapshot.cards
-        for obj in list(snap.get("images") or []) + list(snap.get("cards") or []):
-            u = obj.get("resizedImageUrl") or obj.get("originalImageUrl")
-            if u and u not in imgs: imgs.append(u)
-        # snapshot.videos
-        for obj in (snap.get("videos") or []):
-            u = obj.get("videoUrl") or obj.get("videoHdUrl")
-            if u and u not in vids: vids.append(u)
-        return imgs, vids
-
     for ad in unique:
-        imgs, vids = extract_urls(ad)
+        imgs, vids = extract_urls(ad, platform)
         ad["_imgs_cdn"] = imgs
         ad["_vids_cdn"] = vids
 
-    # build viewer HTML
-    job["html"]   = build_viewer(job_id, brand, country, unique)
+    job["html"]   = build_viewer(job_id, brand, platform, country, unique)
     job["status"] = "done"
     log("✅ Done!")
 
 
-def build_viewer(job_id, brand, country, ads):
-    active = sum(1 for a in ads if a.get("isActive"))
+# ── Viewer builder ────────────────────────────────────────────────────────────
+def build_viewer(job_id, brand, platform, country, ads):
+    COLOR  = PLATFORMS.get(platform, {}).get("color", "#1A3A5C")
+    plabel = PLATFORMS.get(platform, {}).get("label", platform)
+
+    # Count active/inactive
+    active_count = 0
+    for ad in ads:
+        n = normalize_ad(ad, platform)
+        if n.get("status") == "ACTIVE":
+            active_count += 1
 
     def card(ad):
-        aid     = ad.get("adArchiveId", "")
-        page    = ad.get("pageName", "Unknown")
-        status  = "ACTIVE" if ad.get("isActive") else "INACTIVE"
-        start   = ad.get("startDate", "")
-        fmt     = ad.get("displayFormat", "")
-        body    = (ad.get("bodyText") or "").replace('"','&quot;').replace('\n','<br>')
-        title   = (ad.get("title") or "").replace('"','&quot;')
-        cta     = ad.get("ctaText") or ""
-        lp      = ad.get("linkUrl") or "#"
-        lib_url = ad.get("adLibraryUrl", f"https://www.facebook.com/ads/library/?id={aid}")
-        plats   = " · ".join(p.replace("AUDIENCE_NETWORK","AN").replace("FACEBOOK","FB")
-                              .replace("INSTAGRAM","IG").replace("MESSENGER","Msg")
-                              for p in (ad.get("platforms") or []))
-        imgs    = ad.get("_imgs_cdn") or []
-        vids    = ad.get("_vids_cdn") or []
-        collations = ad.get("collationCount", 0)
+        n    = normalize_ad(ad, platform)
+        imgs = ad.get("_imgs_cdn") or []
+        vids = ad.get("_vids_cdn") or []
 
-        # derive format from actual content, fall back to displayFormat field
+        # format badge
         if vids:
             fmt = "VIDEO"
         elif imgs:
             fmt = "IMAGE"
-        elif not fmt or fmt == "None":
+        elif platform == "google":
+            fmt = ad.get("format", "TEXT")
+        elif platform == "linkedin":
+            fmt = ad.get("format", "").replace("SINGLE_IMAGE","IMAGE").replace("_"," ")
+            if not fmt: fmt = "UNKNOWN"
+        else:
             fmt = "UNKNOWN"
 
-        if vids:
-            media = f'<div class="media-wrap"><video controls preload="metadata" src="{vids[0]}" crossorigin="anonymous"></video></div>'
-        elif imgs:
-            img_html = "".join(f'<img src="{img}" onclick="openFull(this.src)" crossorigin="anonymous">' for img in imgs[:4])
-            media = f'<div class="media-wrap img-grid img-count-{min(len(imgs),4)}">{img_html}</div>'
-        else:
-            media = f'<div class="media-placeholder"><span>{"🎬" if fmt=="VIDEO" else "🖼️"}</span><a href="{lib_url}" target="_blank">View in Ad Library →</a></div>'
+        status  = n["status"]
+        lib_url = n["lib_url"] or "#"
 
+        if vids:
+            media = (f'<div class="media-wrap">'
+                     f'<video controls preload="metadata" src="{vids[0]}" crossorigin="anonymous"></video>'
+                     f'</div>')
+        elif imgs:
+            img_html = "".join(
+                f'<img src="{img}" onclick="openFull(this.src)" crossorigin="anonymous">'
+                for img in imgs[:4])
+            media = (f'<div class="media-wrap img-grid img-count-{min(len(imgs),4)}">'
+                     f'{img_html}</div>')
+        else:
+            icon = "🎬" if fmt == "VIDEO" else ("📝" if fmt in ("TEXT","") else "🖼️")
+            media = (f'<div class="media-placeholder">'
+                     f'<span>{icon}</span>'
+                     f'<a href="{lib_url}" target="_blank">View in Ad Library →</a>'
+                     f'</div>')
+
+        body  = (n["body"] or "").replace('"', '&quot;').replace('\n', '<br>')
+        title = (n["title"] or "").replace('"', '&quot;')
+        cta   = n["cta"] or ""
+        lp    = n["landing"] or "#"
         try:
-            from urllib.parse import urlparse
-            lp_host = urlparse(lp).netloc
+            lp_host = urlparse(lp).netloc or lp
         except:
             lp_host = lp
 
+        imp_badge = (f'<span class="badge imp">👁 {n["impressions"]}</span>'
+                     if n.get("impressions") else "")
+        var_badge = (f'<span class="badge hot">🔥 {n["variants"]} variants</span>'
+                     if n.get("variants", 0) > 2 else "")
+
         return f'''<div class="card" data-status="{status}" data-fmt="{fmt}">
   <div class="card-header">
-    <div class="card-name">{page}</div>
-    <div class="card-meta">{start} · {plats}</div>
+    <div class="card-name">{n["name"]}</div>
+    <div class="card-meta">{n["date"]} · {n["plats"]}</div>
     <div class="badge-row">
-      <span class="badge {'active' if status=='ACTIVE' else 'inactive'}">{status}</span>
+      <span class="badge {'active' if status=='ACTIVE' else ('inactive' if status=='INACTIVE' else 'unknown')}">{status}</span>
       <span class="badge fmt">{fmt}</span>
-      {"<span class='badge hot'>🔥 "+str(collations)+" variants</span>" if collations>2 else ""}
+      {imp_badge}{var_badge}
     </div>
   </div>
   {media}
   <div class="card-body">
     {f'<div class="ad-title">{title}</div>' if title else ""}
-    <div class="ad-copy">{body or "<em style='color:#aaa'>No copy</em>"}</div>
+    <div class="ad-copy">{body or "<em style='color:#aaa'>No copy text</em>"}</div>
   </div>
   <div class="card-footer">
     <span class="cta-pill">{cta}</span>
@@ -175,17 +339,15 @@ def build_viewer(job_id, brand, country, ads):
 </div>'''
 
     cards = "\n".join(card(a) for a in ads)
-    COLOR = "#1A3A5C"
 
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>{brand} — Ad Intel</title>
+<title>{brand} — {plabel}</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:Arial,sans-serif;background:#f0f2f5}}
 header{{background:{COLOR};color:white;padding:16px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}}
 header h1{{font-size:18px}}header a{{color:rgba(255,255,255,.7);font-size:12px;text-decoration:none}}
 header a:hover{{color:white}}
-.dl-btn{{background:rgba(255,255,255,.2);color:white;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:bold;text-decoration:none;white-space:nowrap}}
-.dl-btn:hover{{background:rgba(255,255,255,.35);color:white}}
+.plat-tag{{background:rgba(255,255,255,.2);padding:3px 10px;border-radius:10px;font-size:11px;font-weight:bold}}
 .stats{{display:flex;gap:12px;font-size:12px}}
 .stat{{background:rgba(255,255,255,.15);padding:5px 12px;border-radius:20px;text-align:center}}
 .stat strong{{display:block;font-size:18px}}
@@ -200,20 +362,22 @@ header a:hover{{color:white}}
 .badge-row{{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}}
 .badge{{font-size:10px;font-weight:bold;padding:2px 7px;border-radius:9px}}
 .badge.active{{background:#d4edda;color:#155724}}.badge.inactive{{background:#f8d7da;color:#721c24}}
+.badge.unknown{{background:#e2e3e5;color:#383d41}}
 .badge.fmt{{background:#e2e3e5;color:#383d41}}.badge.hot{{background:#fff3cd;color:#856404}}
+.badge.imp{{background:#cce5ff;color:#004085}}
 .media-wrap{{background:#000;max-height:300px;overflow:hidden}}
 .media-wrap video{{width:100%;max-height:300px;object-fit:contain;display:block}}
 .img-grid{{display:grid;background:#f7f8fa}}
 .img-count-1{{grid-template-columns:1fr}}.img-count-2,.img-count-3,.img-count-4{{grid-template-columns:1fr 1fr}}
 .img-grid img{{width:100%;height:150px;object-fit:cover;cursor:zoom-in;border:1px solid #eee}}
 .media-placeholder{{background:#f7f8fa;min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:#999}}
-.media-placeholder span{{font-size:32px}}.media-placeholder a{{color:#1877f2;font-size:13px;font-weight:bold;text-decoration:none}}
+.media-placeholder span{{font-size:32px}}.media-placeholder a{{color:{COLOR};font-size:13px;font-weight:bold;text-decoration:none}}
 .card-body{{padding:10px 12px;flex:1}}.ad-title{{font-weight:bold;font-size:13px;margin-bottom:4px}}
 .ad-copy{{font-size:12px;color:#555;line-height:1.5;max-height:72px;overflow:hidden;transition:max-height .3s}}
 .ad-copy.open{{max-height:500px}}.toggle-copy{{color:{COLOR};font-size:11px;font-weight:bold;cursor:pointer;margin-top:4px;display:inline-block}}
 .card-footer{{padding:8px 12px;border-top:1px solid #f0f0f0;display:flex;gap:6px;align-items:center}}
 .cta-pill{{background:{COLOR};color:white;font-size:10px;font-weight:bold;padding:2px 8px;border-radius:10px;white-space:nowrap}}
-.lp-link{{font-size:11px;color:#1877f2;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}}
+.lp-link{{font-size:11px;color:{COLOR};text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}}
 .lib-link{{font-size:11px;color:#888;text-decoration:none;white-space:nowrap}}
 #lb{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:999;align-items:center;justify-content:center;cursor:zoom-out}}
 #lb.open{{display:flex}}#lb img{{max-width:92vw;max-height:92vh;border-radius:8px}}
@@ -221,13 +385,12 @@ header a:hover{{color:white}}
 <header>
   <div>
     <h1>{brand} — Ad Intelligence</h1>
-    <a href="/">← New scrape</a>
+    <span class="plat-tag">{plabel}</span>
+    <a href="/" style="margin-top:6px;display:block">← New scrape</a>
   </div>
-  <div style="display:flex;gap:10px;align-items:center">
-<div class="stats">
-      <div class="stat"><strong>{len(ads)}</strong>total</div>
-      <div class="stat"><strong>{active}</strong>active</div>
-    </div>
+  <div class="stats">
+    <div class="stat"><strong>{len(ads)}</strong>total</div>
+    <div class="stat"><strong>{active_count}</strong>active</div>
   </div>
 </header>
 <div class="filters">
@@ -249,16 +412,23 @@ document.querySelectorAll('.ad-copy').forEach(el=>{{if(el.scrollHeight>el.client
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+PLATFORM_OPTIONS = "\n".join(
+    f'<option value="{k}">{v["label"]}</option>'
+    for k, v in PLATFORMS.items()
+)
+COUNTRY_OPTIONS = "\n".join(f'<option value="{c}">{c}</option>' for c in COUNTRIES)
+
 HOME = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Ad Intel Scraper</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center}
-.card{background:white;border-radius:14px;padding:36px 40px;width:520px;box-shadow:0 4px 20px rgba(0,0,0,.1)}
-h1{font-size:22px;color:#1a1a1a;margin-bottom:4px}p.sub{font-size:13px;color:#888;margin-bottom:28px}
+.card{background:white;border-radius:14px;padding:36px 40px;width:540px;box-shadow:0 4px 20px rgba(0,0,0,.1)}
+h1{font-size:22px;color:#1a1a1a;margin-bottom:4px}p.sub{font-size:13px;color:#888;margin-bottom:24px}
 label{display:block;font-size:12px;font-weight:bold;color:#555;margin-bottom:5px;margin-top:16px}
 input,select{width:100%;padding:9px 12px;border:1px solid #ddd;border-radius:7px;font-size:14px;outline:none}
 input:focus,select:focus{border-color:#1877f2}
+.platform-select{border:2px solid #1877f2;font-weight:bold}
 .search-row{display:flex;gap:6px;margin-bottom:6px}
 .search-row input{flex:1}
 .remove-btn{background:#fee;border:1px solid #fcc;color:#c00;border-radius:6px;padding:0 10px;cursor:pointer;font-size:16px;flex-shrink:0}
@@ -267,68 +437,105 @@ input:focus,select:focus{border-color:#1877f2}
 .submit-btn{background:#1877f2;color:white;border:none;border-radius:8px;padding:12px;width:100%;font-size:15px;font-weight:bold;cursor:pointer;margin-top:24px}
 .submit-btn:hover{background:#166fe5}
 .hint{font-size:11px;color:#aaa;margin-top:4px}
+.platform-hint{font-size:11px;color:#888;margin-top:6px;padding:8px 10px;background:#f8f9ff;border-radius:6px;border-left:3px solid #1877f2;display:none}
+.platform-hint.show{display:block}
 </style></head><body>
 <div class="card">
   <h1>Ad Intelligence Scraper</h1>
-  <p class="sub">Scrape Meta Ad Library for any brand</p>
+  <p class="sub">Scrape ad libraries across Meta, Google, TikTok and LinkedIn</p>
   <form method="POST" action="/start">
+    <label>Platform</label>
+    <select name="platform" class="platform-select" onchange="updatePlatform(this.value)">
+      PLATFORM_OPTIONS
+    </select>
+    <div id="platform-hint" class="platform-hint"></div>
     <label>Brand Name</label>
-    <input name="brand" placeholder="e.g. GLPure" required>
-    <small style="color:#aaa;font-size:11px">You can use just the Brand Website field — search terms are optional</small>
-    <label>Brand Website <span style="font-weight:normal;color:#aaa">(optional — domain auto-added to search)</span></label>
-    <input name="domain" placeholder="e.g. https://get-glpure.com/en-GB">
+    <input name="brand" placeholder="e.g. NovaBurn" required>
+    <label>Brand Website <span style="font-weight:normal;color:#aaa">(optional)</span></label>
+    <input name="domain" placeholder="e.g. https://get-novaburn.com">
     <label>Country</label>
     <select name="country">
       COUNTRY_OPTIONS
     </select>
     <label>Search Terms <span style="font-weight:normal;color:#aaa">(one group per row, comma-separated)</span></label>
     <div id="searches">
-      <div class="search-row"><input name="search[]" placeholder="e.g. glpure, gl pure"><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
-      <div class="search-row"><input name="search[]" placeholder="e.g. get-glpure.com"><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
+      <div class="search-row"><input name="search[]" placeholder="e.g. brand name, slogan"><button type="button" class="remove-btn" onclick="removeRow(this)">×</button></div>
     </div>
     <button type="button" class="add-btn" onclick="addRow()">+ Add search group</button>
-    <p class="hint">Tip: brand name, domain, and category terms give the best coverage</p>
+    <p class="hint">Tip: brand name + domain give the best coverage</p>
     <button type="submit" class="submit-btn">Start Scrape →</button>
   </form>
 </div>
 <script>
+const HINTS = {
+  meta: 'Searches Meta Ad Library (Facebook & Instagram). Uses keyword search — works best with brand name and domain.',
+  google: 'Searches Google Ads Transparency Center by brand name and domain. Country filters by region shown.',
+  tiktok: 'Searches TikTok Ad Library by advertiser name. Country filters which region\'s ads to show.'
+};
+function updatePlatform(v){
+  const h=document.getElementById('platform-hint');
+  h.textContent=HINTS[v]||'';
+  h.className='platform-hint'+(HINTS[v]?' show':'');
+}
 function addRow(){const d=document.getElementById('searches');const r=document.createElement('div');r.className='search-row';r.innerHTML='<input name="search[]" placeholder="Search terms..."><button type="button" class="remove-btn" onclick="removeRow(this)">×</button>';d.appendChild(r)}
 function removeRow(b){if(document.querySelectorAll('.search-row').length>1)b.parentElement.remove()}
+updatePlatform(document.querySelector('[name=platform]').value);
 </script></body></html>"""
 
-COUNTRY_OPTIONS = "\n".join(f'<option value="{c}">{c}</option>' for c in COUNTRIES)
 
 @app.route("/")
 def home():
-    return HOME.replace("COUNTRY_OPTIONS", COUNTRY_OPTIONS)
+    return (HOME
+            .replace("PLATFORM_OPTIONS", PLATFORM_OPTIONS)
+            .replace("COUNTRY_OPTIONS", COUNTRY_OPTIONS))
+
 
 @app.route("/start", methods=["POST"])
 def start():
+    platform     = request.form.get("platform", "meta")
     brand        = request.form.get("brand", "Brand").strip()
     country      = request.form.get("country", "GB")
     domain_input = request.form.get("domain", "").strip()
     searches_raw = request.form.getlist("search[]")
     searches     = [[q.strip() for q in s.split(",") if q.strip()] for s in searches_raw if s.strip()]
 
-    # extract domain from URL and prepend as a search group
+    # Extract clean domain
+    domain = ""
     if domain_input:
-        from urllib.parse import urlparse
-        parsed  = urlparse(domain_input if "://" in domain_input else "https://" + domain_input)
-        netloc  = parsed.netloc
-        if netloc:
-            searches.insert(0, [netloc])
+        parsed = urlparse(domain_input if "://" in domain_input else "https://" + domain_input)
+        domain = parsed.netloc
+
+    # For Meta only: prepend domain as first search group
+    if platform == "meta" and domain and [domain] not in searches:
+        searches.insert(0, [domain])
+
+    # If no searches at all, use brand name
+    if not searches:
+        searches = [[brand]]
 
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "running", "log": [], "html": None, "config": {"brand": brand}}
+    jobs[job_id] = {
+        "status": "running",
+        "log":    [],
+        "html":   None,
+        "config": {"brand": brand, "platform": platform}
+    }
 
-    threading.Thread(target=run_job, args=(job_id, brand, country, searches), daemon=True).start()
+    threading.Thread(
+        target=run_job,
+        args=(job_id, platform, brand, country, searches, domain),
+        daemon=True
+    ).start()
 
-    return render_template_string(PROGRESS_HTML, job_id=job_id, brand=brand)
+    plabel = PLATFORMS.get(platform, {}).get("label", platform)
+    return render_template_string(PROGRESS_HTML, job_id=job_id, brand=brand, plabel=plabel)
+
 
 @app.route("/status/<job_id>")
 def status(job_id):
     job = jobs.get(job_id, {"status": "not_found", "log": []})
     return jsonify({"status": job["status"], "log": job["log"]})
+
 
 @app.route("/viewer/<job_id>")
 def viewer(job_id):
@@ -337,13 +544,15 @@ def viewer(job_id):
         return "Job not found or still running.", 404
     return job["html"]
 
+
 PROGRESS_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Scraping {{ brand }}…</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;background:#f0f2f5;min-height:100vh;display:flex;align-items:center;justify-content:center}
 .card{background:white;border-radius:14px;padding:36px 40px;width:520px;box-shadow:0 4px 20px rgba(0,0,0,.1)}
-h1{font-size:20px;color:#1a1a1a;margin-bottom:20px}
+h1{font-size:20px;color:#1a1a1a;margin-bottom:4px}
+.plat{font-size:12px;color:#888;margin-bottom:18px}
 #log{font-family:monospace;font-size:13px;line-height:1.8;color:#333;min-height:200px;max-height:340px;overflow-y:auto;background:#f8f8f8;border-radius:8px;padding:14px}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ddd;border-top-color:#1877f2;border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:8px}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -353,6 +562,7 @@ h1{font-size:20px;color:#1a1a1a;margin-bottom:20px}
 </style></head><body>
 <div class="card">
   <h1><span class="spinner" id="spin"></span>Scraping {{ brand }}…</h1>
+  <div class="plat">{{ plabel }}</div>
   <div id="log">Starting…</div>
   <button id="open-btn" onclick="window.location='/viewer/{{ job_id }}'">Open Viewer →</button>
   <button id="new-btn" onclick="window.location='/'">← Scrape another brand</button>
