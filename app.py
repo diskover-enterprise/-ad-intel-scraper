@@ -3,7 +3,7 @@
 Ad Intelligence Scraper — Railway hosted version
 """
 
-import json, time, threading, uuid, os, urllib.request, zipfile, io
+import json, time, threading, uuid, os, urllib.request
 from flask import Flask, request, jsonify, Response, render_template_string
 
 app = Flask(__name__)
@@ -31,28 +31,6 @@ def api_get(path):
     url = f"{BASE}/{path}{sep}token={TOKEN}"
     with urllib.request.urlopen(url, timeout=60) as r:
         return json.loads(r.read())
-
-def fetch_url(url):
-    # Use Apify residential proxy to bypass Facebook CDN IP blocking
-    proxy_url = f"http://groups-RESIDENTIAL:{TOKEN}@proxy.apify.com:8000"
-    proxy_handler = urllib.request.ProxyHandler({
-        "http":  proxy_url,
-        "https": proxy_url
-    })
-    opener = urllib.request.build_opener(proxy_handler)
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Referer":    "https://www.facebook.com/"
-    })
-    try:
-        with opener.open(req, timeout=45) as r:
-            data = r.read()
-            ct   = r.headers.get("Content-Type", "application/octet-stream")
-            print(f"[fetch] OK {len(data)} bytes {url[:80]}")
-            return data, ct
-    except Exception as e:
-        print(f"[fetch] FAILED {e} {url[:80]}")
-        return None, None
 
 def safe(s):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))
@@ -99,49 +77,44 @@ def run_job(job_id, brand, country, searches):
 
     log(f"📊 {len(unique)} unique ads total")
 
-    # download creatives into memory
-    log("📥 Downloading creatives...")
-    downloaded = 0
-    failed = 0
+    # debug: log image fields from first ad so we can see the data structure
+    if unique:
+        first = unique[0]
+        snap = first.get("snapshot") or {}
+        log(f"   🔎 imageUrls: {first.get('imageUrls')}")
+        log(f"   🔎 snapshot.images: {[i.get('resizedImageUrl','') for i in (snap.get('images') or [])][:2]}")
+        log(f"   🔎 snapshot.cards: {[c.get('resizedImageUrl','') for c in (snap.get('cards') or [])][:2]}")
+        log(f"   🔎 snapshot.videos: {[v.get('videoUrl','') for v in (snap.get('videos') or [])][:2]}")
 
-    # test proxy with first available URL before attempting all downloads
-    first_url = next((u for ad in unique for u in (ad.get("imageUrls") or []) + (ad.get("videoUrls") or []) if u), None)
-    if first_url:
-        test_data, _ = fetch_url(first_url)
-        if test_data:
-            log(f"   ✓ Proxy OK — {len(test_data):,} bytes")
-        else:
-            log(f"   ✗ Proxy failed — creatives cannot be downloaded from this server")
-            log(f"   ℹ Use the local script (ad_intel_scraper.py) to download creatives")
+    log("🖼️  Creatives load directly in browser — use 'Save Creatives' to view & save them")
 
+    # collect all CDN URLs — check both top-level and snapshot fields
+    def extract_urls(ad):
+        imgs, vids = [], []
+        snap = ad.get("snapshot") or {}
+        # top-level lists
+        for u in (ad.get("imageUrls") or []):
+            if u: imgs.append(u)
+        for u in (ad.get("videoUrls") or []):
+            if u: vids.append(u)
+        # snapshot.images / snapshot.cards
+        for obj in list(snap.get("images") or []) + list(snap.get("cards") or []):
+            u = obj.get("resizedImageUrl") or obj.get("originalImageUrl")
+            if u and u not in imgs: imgs.append(u)
+        # snapshot.videos
+        for obj in (snap.get("videos") or []):
+            u = obj.get("videoUrl") or obj.get("videoHdUrl")
+            if u and u not in vids: vids.append(u)
+        return imgs, vids
+
+    cdn_urls = []
     for ad in unique:
-        aid  = ad.get("adArchiveId", "unknown")
-        page = safe(ad.get("pageName", brand))
-        for i, url in enumerate(ad.get("imageUrls") or []):
-            fname = f"{page}_{aid}_img{i+1}.jpg"
-            data, ct = fetch_url(url)
-            if data:
-                job["media"][fname] = (data, ct or "image/jpeg")
-                downloaded += 1
-            else:
-                failed += 1
-            ad.setdefault("_imgs", []).append(fname if data else None)
-            time.sleep(0.1)
-        for i, url in enumerate(ad.get("videoUrls") or []):
-            fname = f"{page}_{aid}_vid{i+1}.mp4"
-            data, ct = fetch_url(url)
-            if data:
-                job["media"][fname] = (data, ct or "video/mp4")
-                downloaded += 1
-            else:
-                failed += 1
-            ad.setdefault("_vids", []).append(fname if data else None)
-            time.sleep(0.1)
-
-    if failed > 0:
-        log(f"   ✓ {downloaded} downloaded, ✗ {failed} failed (CDN may be blocking server IPs)")
-    else:
-        log(f"   ✓ {downloaded} creatives downloaded")
+        imgs, vids = extract_urls(ad)
+        ad["_imgs_cdn"] = imgs
+        ad["_vids_cdn"] = vids
+        for u in imgs: cdn_urls.append((u, "image"))
+        for u in vids: cdn_urls.append((u, "video"))
+    job["_cdn_urls"] = cdn_urls
 
     # build viewer HTML
     job["html"]   = build_viewer(job_id, brand, country, unique)
@@ -166,14 +139,14 @@ def build_viewer(job_id, brand, country, ads):
         plats   = " · ".join(p.replace("AUDIENCE_NETWORK","AN").replace("FACEBOOK","FB")
                               .replace("INSTAGRAM","IG").replace("MESSENGER","Msg")
                               for p in (ad.get("platforms") or []))
-        imgs    = [f for f in (ad.get("_imgs") or []) if f]
-        vids    = [f for f in (ad.get("_vids") or []) if f]
+        imgs    = ad.get("_imgs_cdn") or []
+        vids    = ad.get("_vids_cdn") or []
         collations = ad.get("collationCount", 0)
 
         if vids:
-            media = f'<div class="media-wrap"><video controls preload="metadata" src="/media/{job_id}/{vids[0]}"></video></div>'
+            media = f'<div class="media-wrap"><video controls preload="metadata" src="{vids[0]}" crossorigin="anonymous"></video></div>'
         elif imgs:
-            img_html = "".join(f'<img src="/media/{job_id}/{img}" onclick="openFull(this.src)">' for img in imgs[:4])
+            img_html = "".join(f'<img src="{img}" onclick="openFull(this.src)" crossorigin="anonymous">' for img in imgs[:4])
             media = f'<div class="media-wrap img-grid img-count-{min(len(imgs),4)}">{img_html}</div>'
         else:
             media = f'<div class="media-placeholder"><span>{"🎬" if fmt=="VIDEO" else "🖼️"}</span><a href="{lib_url}" target="_blank">View in Ad Library →</a></div>'
@@ -256,7 +229,7 @@ header a:hover{{color:white}}
     <a href="/">← New scrape</a>
   </div>
   <div style="display:flex;gap:10px;align-items:center">
-    <a href="/download/{job_id}" class="dl-btn">⬇ Download All</a>
+    <a href="/creatives/{job_id}" class="dl-btn" target="_blank">🖼 Save Creatives</a>
     <div class="stats">
       <div class="stat"><strong>{len(ads)}</strong>total</div>
       <div class="stat"><strong>{active}</strong>active</div>
@@ -351,7 +324,7 @@ def start():
             searches.insert(0, [netloc])
 
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None, "config": {"brand": brand}}
+    jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None, "config": {"brand": brand}, "_cdn_urls": []}
 
     threading.Thread(target=run_job, args=(job_id, brand, country, searches), daemon=True).start()
 
@@ -369,31 +342,38 @@ def viewer(job_id):
         return "Job not found or still running.", 404
     return job["html"]
 
-@app.route("/download/<job_id>")
-def download_zip(job_id):
+@app.route("/creatives/<job_id>")
+def creatives_page(job_id):
     job = jobs.get(job_id)
-    if not job or not job.get("media"):
-        return "No creatives found.", 404
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for filename, (data, _) in job["media"].items():
-            zf.writestr(filename, data)
-    buf.seek(0)
-    brand = job.get("config", {}).get("brand", "ads")
-    return Response(buf.read(),
-        mimetype="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{brand}_creatives.zip"'})
-
-@app.route("/media/<job_id>/<filename>")
-def media(job_id, filename):
-    job = jobs.get(job_id)
-    if not job:
-        return "Not found", 404
-    item = job["media"].get(filename)
-    if not item:
-        return "Not found", 404
-    data, ct = item
-    return Response(data, content_type=ct)
+    if not job or not job.get("html"):
+        return "Job not found.", 404
+    brand = job.get("config", {}).get("brand", "Brand")
+    # collect all CDN URLs from the ads stored in the viewer
+    # we store urls directly on the job for this page
+    urls = job.get("_cdn_urls", [])
+    if not urls:
+        return "No creatives found for this job.", 404
+    items_html = ""
+    for i, (url, kind) in enumerate(urls):
+        if kind == "video":
+            items_html += f'<div class="item"><div class="label">Video {i+1}</div><video src="{url}" controls></video><a href="{url}" target="_blank" class="open-btn">Open in new tab →</a></div>'
+        else:
+            items_html += f'<div class="item"><div class="label">Image {i+1}</div><img src="{url}" onclick="window.open(this.src)"><a href="{url}" target="_blank" class="open-btn">Open in new tab →</a></div>'
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{brand} Creatives</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:Arial,sans-serif;background:#111;color:white;padding:20px}}
+h1{{font-size:18px;margin-bottom:8px}}p{{font-size:13px;color:#aaa;margin-bottom:20px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}}
+.item{{background:#222;border-radius:8px;overflow:hidden}}
+.label{{font-size:11px;color:#888;padding:8px 10px}}
+.item img,.item video{{width:100%;display:block;max-height:300px;object-fit:contain;background:#000}}
+.open-btn{{display:block;text-align:center;padding:8px;font-size:12px;color:#1877f2;text-decoration:none;background:#1a1a1a}}
+.open-btn:hover{{background:#222}}
+</style></head><body>
+<h1>{brand} — Creatives</h1>
+<p>Right-click any image or video and choose "Save As" to download. Or click "Open in new tab" then save from there.</p>
+<div class="grid">{items_html}</div>
+</body></html>"""
 
 PROGRESS_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Scraping {{ brand }}…</title>
