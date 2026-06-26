@@ -98,14 +98,10 @@ def run_job(job_id, brand, country, searches):
             if u and u not in vids: vids.append(u)
         return imgs, vids
 
-    cdn_urls = []
     for ad in unique:
         imgs, vids = extract_urls(ad)
         ad["_imgs_cdn"] = imgs
         ad["_vids_cdn"] = vids
-        for u in imgs: cdn_urls.append((u, "image"))
-        for u in vids: cdn_urls.append((u, "video"))
-    job["_cdn_urls"] = cdn_urls
 
     # build viewer HTML
     job["html"]   = build_viewer(job_id, brand, country, unique)
@@ -133,6 +129,14 @@ def build_viewer(job_id, brand, country, ads):
         imgs    = ad.get("_imgs_cdn") or []
         vids    = ad.get("_vids_cdn") or []
         collations = ad.get("collationCount", 0)
+
+        # derive format from actual content, fall back to displayFormat field
+        if vids:
+            fmt = "VIDEO"
+        elif imgs:
+            fmt = "IMAGE"
+        elif not fmt or fmt == "None":
+            fmt = "UNKNOWN"
 
         if vids:
             media = f'<div class="media-wrap"><video controls preload="metadata" src="{vids[0]}" crossorigin="anonymous"></video></div>'
@@ -220,8 +224,7 @@ header a:hover{{color:white}}
     <a href="/">← New scrape</a>
   </div>
   <div style="display:flex;gap:10px;align-items:center">
-    <a href="/creatives/{job_id}" class="dl-btn" target="_blank">🖼 Save Creatives</a>
-    <div class="stats">
+<div class="stats">
       <div class="stat"><strong>{len(ads)}</strong>total</div>
       <div class="stat"><strong>{active}</strong>active</div>
     </div>
@@ -230,6 +233,7 @@ header a:hover{{color:white}}
 <div class="filters">
   <button class="fbtn on" onclick="filter('all',this)">All</button>
   <button class="fbtn" onclick="filter('ACTIVE',this)">Active Only</button>
+  <button class="fbtn" onclick="filter('INACTIVE',this)">Inactive</button>
   <button class="fbtn" onclick="filter('VIDEO',this)">📹 Video</button>
   <button class="fbtn" onclick="filter('IMAGE',this)">🖼 Image</button>
   <span class="fcount" id="fc">{len(ads)} ads</span>
@@ -237,7 +241,7 @@ header a:hover{{color:white}}
 <div class="grid" id="grid">{cards}</div>
 <div id="lb" onclick="this.classList.remove('open')"><img id="lbi" src=""></div>
 <script>
-function filter(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');let n=0;document.querySelectorAll('.card').forEach(c=>{{let s=f==='all'||(f==='ACTIVE'&&c.dataset.status==='ACTIVE')||(f==='VIDEO'&&c.dataset.fmt==='VIDEO')||(f==='IMAGE'&&['IMAGE','DCO','DPA'].includes(c.dataset.fmt));c.style.display=s?'':'none';if(s)n++}});document.getElementById('fc').textContent=n+' ads'}}
+function filter(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');let n=0;document.querySelectorAll('.card').forEach(c=>{{let s=f==='all'||(f==='ACTIVE'&&c.dataset.status==='ACTIVE')||(f==='INACTIVE'&&c.dataset.status==='INACTIVE')||(f==='VIDEO'&&c.dataset.fmt==='VIDEO')||(f==='IMAGE'&&c.dataset.fmt==='IMAGE');c.style.display=s?'':'none';if(s)n++}});document.getElementById('fc').textContent=n+' ads'}}
 function openFull(s){{document.getElementById('lbi').src=s;document.getElementById('lb').classList.add('open')}}
 document.querySelectorAll('.ad-copy').forEach(el=>{{if(el.scrollHeight>el.clientHeight+5){{const t=document.createElement('span');t.className='toggle-copy';t.textContent='Read more ▼';t.onclick=()=>{{el.classList.toggle('open');t.textContent=el.classList.contains('open')?'Show less ▲':'Read more ▼'}};el.after(t)}}}})</script>
 </body></html>"""
@@ -315,7 +319,7 @@ def start():
             searches.insert(0, [netloc])
 
     job_id = str(uuid.uuid4())[:8]
-    jobs[job_id] = {"status": "running", "log": [], "media": {}, "html": None, "config": {"brand": brand}, "_cdn_urls": []}
+    jobs[job_id] = {"status": "running", "log": [], "html": None, "config": {"brand": brand}}
 
     threading.Thread(target=run_job, args=(job_id, brand, country, searches), daemon=True).start()
 
@@ -332,39 +336,6 @@ def viewer(job_id):
     if not job or not job.get("html"):
         return "Job not found or still running.", 404
     return job["html"]
-
-@app.route("/creatives/<job_id>")
-def creatives_page(job_id):
-    job = jobs.get(job_id)
-    if not job or not job.get("html"):
-        return "Job not found.", 404
-    brand = job.get("config", {}).get("brand", "Brand")
-    # collect all CDN URLs from the ads stored in the viewer
-    # we store urls directly on the job for this page
-    urls = job.get("_cdn_urls", [])
-    if not urls:
-        return "No creatives found for this job.", 404
-    items_html = ""
-    for i, (url, kind) in enumerate(urls):
-        if kind == "video":
-            items_html += f'<div class="item"><div class="label">Video {i+1}</div><video src="{url}" controls></video><a href="{url}" target="_blank" class="open-btn">Open in new tab →</a></div>'
-        else:
-            items_html += f'<div class="item"><div class="label">Image {i+1}</div><img src="{url}" onclick="window.open(this.src)"><a href="{url}" target="_blank" class="open-btn">Open in new tab →</a></div>'
-    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{brand} Creatives</title>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:Arial,sans-serif;background:#111;color:white;padding:20px}}
-h1{{font-size:18px;margin-bottom:8px}}p{{font-size:13px;color:#aaa;margin-bottom:20px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}}
-.item{{background:#222;border-radius:8px;overflow:hidden}}
-.label{{font-size:11px;color:#888;padding:8px 10px}}
-.item img,.item video{{width:100%;display:block;max-height:300px;object-fit:contain;background:#000}}
-.open-btn{{display:block;text-align:center;padding:8px;font-size:12px;color:#1877f2;text-decoration:none;background:#1a1a1a}}
-.open-btn:hover{{background:#222}}
-</style></head><body>
-<h1>{brand} — Creatives</h1>
-<p>Right-click any image or video and choose "Save As" to download. Or click "Open in new tab" then save from there.</p>
-<div class="grid">{items_html}</div>
-</body></html>"""
 
 PROGRESS_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Scraping {{ brand }}…</title>
