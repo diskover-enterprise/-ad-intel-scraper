@@ -102,6 +102,18 @@ def run_job(job_id, brand, country, searches):
     # download creatives into memory
     log("📥 Downloading creatives...")
     downloaded = 0
+    failed = 0
+
+    # test proxy with first available URL before attempting all downloads
+    first_url = next((u for ad in unique for u in (ad.get("imageUrls") or []) + (ad.get("videoUrls") or []) if u), None)
+    if first_url:
+        test_data, _ = fetch_url(first_url)
+        if test_data:
+            log(f"   ✓ Proxy OK — {len(test_data):,} bytes")
+        else:
+            log(f"   ✗ Proxy failed — creatives cannot be downloaded from this server")
+            log(f"   ℹ Use the local script (ad_intel_scraper.py) to download creatives")
+
     for ad in unique:
         aid  = ad.get("adArchiveId", "unknown")
         page = safe(ad.get("pageName", brand))
@@ -111,6 +123,8 @@ def run_job(job_id, brand, country, searches):
             if data:
                 job["media"][fname] = (data, ct or "image/jpeg")
                 downloaded += 1
+            else:
+                failed += 1
             ad.setdefault("_imgs", []).append(fname if data else None)
             time.sleep(0.1)
         for i, url in enumerate(ad.get("videoUrls") or []):
@@ -119,10 +133,15 @@ def run_job(job_id, brand, country, searches):
             if data:
                 job["media"][fname] = (data, ct or "video/mp4")
                 downloaded += 1
+            else:
+                failed += 1
             ad.setdefault("_vids", []).append(fname if data else None)
             time.sleep(0.1)
 
-    log(f"   ✓ {downloaded} creatives downloaded")
+    if failed > 0:
+        log(f"   ✓ {downloaded} downloaded, ✗ {failed} failed (CDN may be blocking server IPs)")
+    else:
+        log(f"   ✓ {downloaded} creatives downloaded")
 
     # build viewer HTML
     job["html"]   = build_viewer(job_id, brand, country, unique)
