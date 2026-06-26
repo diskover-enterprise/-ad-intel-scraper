@@ -81,12 +81,11 @@ def run_job(job_id, brand, country, searches):
     if unique:
         first = unique[0]
         snap = first.get("snapshot") or {}
-        log(f"   🔎 ad keys: {list(first.keys())}")
-        log(f"   🔎 snapshot keys: {list(snap.keys()) if snap else 'no snapshot'}")
-        # log first 80 chars of snapshot to see structure
-        import json as _json
-        snap_str = _json.dumps(snap)[:300] if snap else "empty"
-        log(f"   🔎 snapshot sample: {snap_str}")
+        log(f"   🔎 imageUrls: {first.get('imageUrls')}")
+        log(f"   🔎 videoUrls: {first.get('videoUrls')}")
+        log(f"   🔎 videoPreviewUrls: {first.get('videoPreviewUrls')}")
+        log(f"   🔎 displayFormat: {first.get('displayFormat')}")
+        log(f"   🔎 gatedType: {first.get('gatedType')}")
 
     log("🖼️  Creatives load directly in browser — use 'Save Creatives' to view & save them")
 
