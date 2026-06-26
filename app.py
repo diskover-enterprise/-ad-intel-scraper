@@ -24,7 +24,7 @@ PLATFORMS = {
     "google": {"label": "🔵 Google Ads Transparency",   "color": "#4285F4",
                "actor": "automation-lab~google-ads-scraper"},
     "tiktok": {"label": "⬛ TikTok Ad Library",         "color": "#010101",
-               "actor": "data_xplorer~tiktok-ads-library-pay-per-event"},
+               "actor": "rFFzT2mRuOd1K4iTM"},
 }
 
 # ── Apify helpers ─────────────────────────────────────────────────────────────
