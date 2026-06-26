@@ -24,7 +24,7 @@ PLATFORMS = {
     "google": {"label": "🔵 Google Ads Transparency",   "color": "#4285F4",
                "actor": "automation-lab~google-ads-scraper"},
     "tiktok": {"label": "⬛ TikTok Ad Library",         "color": "#010101",
-               "actor": "lexis-solutions~tiktok-ads-scraper"},
+               "actor": "data_xplorer~tiktok-ads-library-pay-per-event"},
 }
 
 # ── Apify helpers ─────────────────────────────────────────────────────────────
@@ -84,12 +84,17 @@ def extract_urls(ad, platform):
         if preview and preview not in imgs: imgs.append(preview)
 
     elif platform == "tiktok":
-        # lexis-solutions fields: videoUrl, imageUrl, coverImageUrl
-        vid = ad.get("videoUrl") or ad.get("video_url")
-        if vid and vid not in vids: vids.append(vid)
-        for key in ("imageUrl", "coverImageUrl", "image_url", "cover_image_url"):
-            u = ad.get(key)
-            if u and u not in imgs: imgs.append(u)
+        # data_xplorer: "Ad Media" = ["Video 1: url", "Cover 1: url", "Image 1: url"]
+        for item in (ad.get("Ad Media") or []):
+            if not isinstance(item, str): continue
+            colon = item.find(": ")
+            if colon == -1: continue
+            label = item[:colon].lower()
+            url   = item[colon+2:].strip()
+            if not url: continue
+            if "video" in label and url not in vids: vids.append(url)
+            elif url not in imgs: imgs.append(url)
+        # fallback: older field names from silva95gustavo
         for v in (ad.get("videos") or []):
             u = v.get("url") or v.get("videoUrl")
             c = v.get("coverImageUrl") or v.get("cover")
@@ -97,6 +102,8 @@ def extract_urls(ad, platform):
             if c and c not in imgs: imgs.append(c)
         for u in (ad.get("imageUrls") or []):
             if u and u not in imgs: imgs.append(u)
+        preview = ad.get("AD Preview")
+        if preview and preview not in imgs: imgs.append(preview)
 
     return imgs, vids
 
@@ -149,11 +156,19 @@ def normalize_ad(ad, platform):
         n["impressions"] = ""
 
     elif platform == "tiktok":
-        # Handle both lexis-solutions and silva95gustavo field names
-        n["name"]   = (ad.get("advertiserName") or ad.get("adv_name") or
-                       ad.get("adName") or "Unknown")
-        first = ad.get("firstShownDate") or ad.get("first_shown_date") or ad.get("createTime") or ""
-        last  = ad.get("lastShownDate")  or ad.get("last_shown_date")  or ""
+        # data_xplorer output: "AD ID", "Advertiser Name", "Ad Dates", "Ad Detail URL", etc.
+        n["name"]   = (ad.get("Advertiser Name") or ad.get("advertiserName") or
+                       ad.get("adv_name") or "Unknown")
+        # Ad Dates: [{"FirstShown": "2025-01-01", ...}, {"LastShown": "2025-03-08", ...}]
+        dates = ad.get("Ad Dates") or []
+        first, last = "", ""
+        for d in dates:
+            if isinstance(d, dict):
+                first = first or d.get("FirstShown", "")
+                last  = last  or d.get("LastShown",  "")
+        # fallback for older actor formats
+        first = first or ad.get("firstShownDate") or ad.get("first_shown_date") or ""
+        last  = last  or ad.get("lastShownDate")  or ad.get("last_shown_date")  or ""
         try:
             last_dt = datetime.strptime(last[:10], "%Y-%m-%d")
             n["status"] = "ACTIVE" if (datetime.now() - last_dt).days <= 30 else "INACTIVE"
@@ -164,28 +179,34 @@ def normalize_ad(ad, platform):
         n["title"]  = ad.get("adTitle") or ad.get("ad_title") or n["name"]
         n["cta"]    = ad.get("callToAction") or ad.get("call_to_action") or ""
         n["landing"]= ad.get("landingPageUrl") or ad.get("landing_page_url") or ad.get("clickUrl") or "#"
-        ad_id    = ad.get("adId") or ad.get("ad_id") or ""
-        adv_id   = ad.get("advertiserId") or ad.get("adv_id") or ""
-        lib_url  = ad.get("adLibraryUrl") or ad.get("ad_library_url") or ""
+        ad_id   = ad.get("AD ID") or ad.get("adId") or ad.get("ad_id") or ""
+        adv_id  = ad.get("advertiserId") or ad.get("adv_id") or ""
+        lib_url = ad.get("Ad Detail URL") or ad.get("adLibraryUrl") or ad.get("ad_library_url") or ""
         n["lib_url"] = (
             lib_url or
-            (f"https://library.tiktok.com/ads/detail?adId={ad_id}" if ad_id else None) or
+            (f"https://library.tiktok.com/ads/detail/?ad_id={ad_id}" if ad_id else None) or
             (f"https://library.tiktok.com/ads?adv_biz_ids={adv_id}&query_type=2" if adv_id else None) or
             "#"
         )
         n["plats"]  = "TikTok"
         n["variants"] = 0
+        # Audience: "100K-200K" string or impressions dict
+        audience = ad.get("Ad Audience") or ""
         imp = ad.get("impressions") or {}
-        if isinstance(imp, dict):
+        if audience:
+            n["impressions"] = audience
+        elif isinstance(imp, dict):
             lo = imp.get("lowerBound", "") or imp.get("lower_bound", "")
             hi = imp.get("upperBound", "") or imp.get("upper_bound", "")
-            n["impressions"] = f"{lo:,}–{hi:,}" if (lo and hi) else str(lo) if lo else ""
+            n["impressions"] = f"{lo}–{hi}" if (lo and hi) else str(lo) if lo else ""
         else:
-            n["impressions"] = str(imp) if imp else ""
-        regions = ad.get("regionStats") or ad.get("region_stats") or []
+            n["impressions"] = ""
+        # Targeting regions
+        targeting = ad.get("Ad Targeting") or {}
+        regions = targeting.get("regions") or ad.get("regionStats") or []
         if regions:
             n["plats"] = "TikTok · " + ", ".join(
-                (r.get("regionCode") or r.get("region_code") or "") for r in regions[:4]
+                (r.get("region") or r.get("regionCode") or "") for r in regions[:4]
             )
 
     return n
@@ -238,20 +259,19 @@ def run_job(job_id, platform, brand, country, searches, domain):
     # ── TikTok ────────────────────────────────────────────────────────────────
     elif platform == "tiktok":
         actor = PLATFORMS["tiktok"]["actor"]
-        # lexis-solutions actor supports EU/EEA countries only
-        EU_COUNTRIES = {"GB","DE","FR","SE","NO","DK","FI","IT","ES","NL",
-                        "BE","AT","CH","IE","PL","PT","RO","HU","CZ","SK",
-                        "BG","HR","CY","EE","GR","IS","LV","LI","LT","LU","MT","SI"}
-        tiktok_country = country if country in EU_COUNTRIES else "GB"
+        # data_xplorer actor supports "all" or any country code globally
+        tiktok_region = country if country else "all"
         keywords = [brand] + [q for queries in searches for q in queries]
         keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
-        log(f"🔍 TikTok Ad Library: query={keywords} country={tiktok_country}")
+        log(f"🔍 TikTok Ad Library: query={keywords} region={tiktok_region}")
         for kw in keywords:
             payload = {
-                "query":    kw,
-                "country":  tiktok_country,
-                "maxPages": 3,
-                "sortBy":   "last_shown_date,desc",
+                "query":        kw,
+                "queryType":    "1",        # 1=keyword, 2=advertiser name/ID
+                "region":       tiktok_region,
+                "maxAds":       50,
+                "fetchDetails": True,
+                "proxyConfiguration": {"useApifyProxy": True},
             }
             try:
                 run    = api_post(f"acts/{actor}/runs", payload)
@@ -271,7 +291,7 @@ def run_job(job_id, platform, brand, country, searches, domain):
         elif platform == "google":
             aid = ad.get("creativeId") or ad.get("adLibraryUrl") or str(id(ad))
         elif platform == "tiktok":
-            aid = ad.get("adId") or str(id(ad))
+            aid = ad.get("AD ID") or ad.get("adId") or str(id(ad))
         else:
             aid = str(id(ad))
         if aid not in seen:
