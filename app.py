@@ -205,9 +205,13 @@ def normalize_ad(ad, platform):
         targeting = ad.get("Ad Targeting") or {}
         regions = targeting.get("regions") or ad.get("regionStats") or []
         if regions:
-            n["plats"] = "TikTok · " + ", ".join(
-                (r.get("region") or r.get("regionCode") or "") for r in regions[:4]
-            )
+            parts = []
+            for r in regions[:4]:
+                if isinstance(r, dict):
+                    parts.append(r.get("region") or r.get("regionCode") or "")
+                elif isinstance(r, str):
+                    parts.append(r)
+            n["plats"] = "TikTok · " + ", ".join(p for p in parts if p)
 
     return n
 
