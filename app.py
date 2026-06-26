@@ -128,7 +128,16 @@ def normalize_ad(ad, platform):
         n["title"]  = fv.get("headline", "") or fv.get("title", "")
         n["cta"]    = fv.get("cta", "")
         n["landing"]= fv.get("clickUrl", "#")
-        n["lib_url"]= ad.get("adLibraryUrl", "#")
+        # Build Google Ads Transparency URL from IDs if adLibraryUrl not present
+        adv_id  = ad.get("advertiserId", "")
+        cre_id  = ad.get("creativeId", "")
+        n["lib_url"] = (
+            ad.get("adLibraryUrl") or
+            (f"https://adstransparency.google.com/advertiser/{adv_id}/creative/{cre_id}"
+             if adv_id and cre_id else None) or
+            (f"https://adstransparency.google.com/?query={urlquote(n['name'])}"
+             if n.get("name") else "#")
+        )
         n["plats"]  = "Google"
         n["variants"] = len(variations)
         n["impressions"] = ""
@@ -141,7 +150,13 @@ def normalize_ad(ad, platform):
         n["title"]  = n["name"]
         n["cta"]    = ""
         n["landing"]= "#"
-        n["lib_url"]= ad.get("startUrl", "#")
+        ad_id    = ad.get("adId", "")
+        adv_id   = ad.get("advertiserId", "")
+        n["lib_url"] = (
+            (f"https://library.tiktok.com/ads/detail?adId={ad_id}" if ad_id else None) or
+            (f"https://library.tiktok.com/ads?adv_biz_ids={adv_id}&query_type=2" if adv_id else None) or
+            ad.get("startUrl", "#")
+        )
         n["plats"]  = "TikTok"
         n["variants"] = 0
         imp = ad.get("impressions") or {}
