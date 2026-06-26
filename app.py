@@ -47,7 +47,7 @@ def run_job(job_id, brand, country, searches):
     for i, queries in enumerate(searches):
         log(f"🔍 Search {i+1}/{len(searches)}: {queries}")
         try:
-            run    = api_post(f"acts/{ACTOR}/runs", {"searchQueries": queries, "country": country, "maxAds": 30})
+            run    = api_post(f"acts/{ACTOR}/runs", {"searchQueries": queries, "country": country, "maxAds": 60})
             run_id = run["data"]["id"]
             log(f"   Run started...")
             for _ in range(80):
