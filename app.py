@@ -24,7 +24,7 @@ PLATFORMS = {
     "google": {"label": "🔵 Google Ads Transparency",   "color": "#4285F4",
                "actor": "automation-lab~google-ads-scraper"},
     "tiktok": {"label": "⬛ TikTok Ad Library",         "color": "#010101",
-               "actor": "silva95gustavo~tiktok-ads-scraper"},
+               "actor": "lexis-solutions~tiktok-ads-scraper"},
 }
 
 # ── Apify helpers ─────────────────────────────────────────────────────────────
@@ -84,11 +84,17 @@ def extract_urls(ad, platform):
         if preview and preview not in imgs: imgs.append(preview)
 
     elif platform == "tiktok":
+        # lexis-solutions fields: videoUrl, imageUrl, coverImageUrl
+        vid = ad.get("videoUrl") or ad.get("video_url")
+        if vid and vid not in vids: vids.append(vid)
+        for key in ("imageUrl", "coverImageUrl", "image_url", "cover_image_url"):
+            u = ad.get(key)
+            if u and u not in imgs: imgs.append(u)
         for v in (ad.get("videos") or []):
-            vid = v.get("url")
-            cover = v.get("coverImageUrl")
-            if vid and vid not in vids: vids.append(vid)
-            if cover and cover not in imgs: imgs.append(cover)
+            u = v.get("url") or v.get("videoUrl")
+            c = v.get("coverImageUrl") or v.get("cover")
+            if u and u not in vids: vids.append(u)
+            if c and c not in imgs: imgs.append(c)
         for u in (ad.get("imageUrls") or []):
             if u and u not in imgs: imgs.append(u)
 
@@ -143,29 +149,44 @@ def normalize_ad(ad, platform):
         n["impressions"] = ""
 
     elif platform == "tiktok":
-        n["name"]   = ad.get("advertiserName") or ad.get("adName") or "Unknown"
-        n["status"] = "ACTIVE"
-        n["date"]   = ""
-        n["body"]   = ""
-        n["title"]  = n["name"]
-        n["cta"]    = ""
-        n["landing"]= "#"
-        ad_id    = ad.get("adId", "")
-        adv_id   = ad.get("advertiserId", "")
+        # Handle both lexis-solutions and silva95gustavo field names
+        n["name"]   = (ad.get("advertiserName") or ad.get("adv_name") or
+                       ad.get("adName") or "Unknown")
+        first = ad.get("firstShownDate") or ad.get("first_shown_date") or ad.get("createTime") or ""
+        last  = ad.get("lastShownDate")  or ad.get("last_shown_date")  or ""
+        try:
+            last_dt = datetime.strptime(last[:10], "%Y-%m-%d")
+            n["status"] = "ACTIVE" if (datetime.now() - last_dt).days <= 30 else "INACTIVE"
+        except:
+            n["status"] = "ACTIVE"
+        n["date"]   = f"{first[:10]} – {last[:10]}" if first and last else first[:10] if first else ""
+        n["body"]   = ad.get("adText") or ad.get("ad_text") or ad.get("description") or ""
+        n["title"]  = ad.get("adTitle") or ad.get("ad_title") or n["name"]
+        n["cta"]    = ad.get("callToAction") or ad.get("call_to_action") or ""
+        n["landing"]= ad.get("landingPageUrl") or ad.get("landing_page_url") or ad.get("clickUrl") or "#"
+        ad_id    = ad.get("adId") or ad.get("ad_id") or ""
+        adv_id   = ad.get("advertiserId") or ad.get("adv_id") or ""
+        lib_url  = ad.get("adLibraryUrl") or ad.get("ad_library_url") or ""
         n["lib_url"] = (
+            lib_url or
             (f"https://library.tiktok.com/ads/detail?adId={ad_id}" if ad_id else None) or
             (f"https://library.tiktok.com/ads?adv_biz_ids={adv_id}&query_type=2" if adv_id else None) or
-            ad.get("startUrl", "#")
+            "#"
         )
         n["plats"]  = "TikTok"
         n["variants"] = 0
         imp = ad.get("impressions") or {}
-        lo  = imp.get("lowerBound", "")
-        hi  = imp.get("upperBound", "")
-        n["impressions"] = f"{lo:,}–{hi:,}" if lo and hi else ""
-        regions = ad.get("regionStats") or []
+        if isinstance(imp, dict):
+            lo = imp.get("lowerBound", "") or imp.get("lower_bound", "")
+            hi = imp.get("upperBound", "") or imp.get("upper_bound", "")
+            n["impressions"] = f"{lo:,}–{hi:,}" if (lo and hi) else str(lo) if lo else ""
+        else:
+            n["impressions"] = str(imp) if imp else ""
+        regions = ad.get("regionStats") or ad.get("region_stats") or []
         if regions:
-            n["plats"] = "TikTok · " + ", ".join(r.get("regionCode","") for r in regions[:4])
+            n["plats"] = "TikTok · " + ", ".join(
+                (r.get("regionCode") or r.get("region_code") or "") for r in regions[:4]
+            )
 
     return n
 
@@ -217,30 +238,30 @@ def run_job(job_id, platform, brand, country, searches, domain):
     # ── TikTok ────────────────────────────────────────────────────────────────
     elif platform == "tiktok":
         actor = PLATFORMS["tiktok"]["actor"]
-        # Build TikTok Ad Library search URLs
+        # lexis-solutions actor supports EU/EEA countries only
+        EU_COUNTRIES = {"GB","DE","FR","SE","NO","DK","FI","IT","ES","NL",
+                        "BE","AT","CH","IE","PL","PT","RO","HU","CZ","SK",
+                        "BG","HR","CY","EE","GR","IS","LV","LI","LT","LU","MT","SI"}
+        tiktok_country = country if country in EU_COUNTRIES else "GB"
         keywords = [brand] + [q for queries in searches for q in queries]
         keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
-        # TikTok requires start_time/end_time timestamps in milliseconds
-        now_ms   = int(time.time() * 1000)
-        start_ms = now_ms - (90 * 24 * 3600 * 1000)  # last 90 days
-        start_urls = []
+        log(f"🔍 TikTok Ad Library: query={keywords} country={tiktok_country}")
         for kw in keywords:
-            start_urls.append({"url":
-                f"https://library.tiktok.com/ads?region=all"
-                f"&start_time={start_ms}&end_time={now_ms}"
-                f"&keyword={urlquote(kw)}&query_type=1&sort_type=last_shown_date,desc"
-            })
-        log(f"🔍 TikTok Ad Library: {[u['url'] for u in start_urls]}")
-        try:
-            run    = api_post(f"acts/{actor}/runs",
-                              {"startUrls": start_urls, "resultsLimit": 60})
-            run_id = run["data"]["id"]
-            log(f"   Run started...")
-            ads = wait_for_run(run_id, log)
-            log(f"   ✓ {len(ads)} ads found")
-            all_ads.extend(ads)
-        except Exception as e:
-            log(f"   ✗ Error: {e}")
+            payload = {
+                "query":    kw,
+                "country":  tiktok_country,
+                "maxPages": 3,
+                "sortBy":   "last_shown_date,desc",
+            }
+            try:
+                run    = api_post(f"acts/{actor}/runs", payload)
+                run_id = run["data"]["id"]
+                log(f"   Run started for '{kw}'...")
+                ads = wait_for_run(run_id, log)
+                log(f"   ✓ {len(ads)} ads for '{kw}'")
+                all_ads.extend(ads)
+            except Exception as e:
+                log(f"   ✗ Error for '{kw}': {e}")
 
     # ── Deduplicate ───────────────────────────────────────────────────────────
     seen, unique = set(), []
