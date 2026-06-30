@@ -124,6 +124,7 @@ def normalize_ad(ad, platform):
             for p in (ad.get("platforms") or []))
         n["variants"] = ad.get("collationCount", 0)
         n["impressions"] = ""
+        n["adv_id"] = ad.get("pageId", "") or ad.get("adArchiveId", "")
 
     elif platform == "google":
         n["name"]   = ad.get("advertiserName", "Unknown")
@@ -144,6 +145,7 @@ def normalize_ad(ad, platform):
         # Build Google Ads Transparency URL from IDs if adLibraryUrl not present
         adv_id  = ad.get("advertiserId", "")
         cre_id  = ad.get("creativeId", "")
+        n["adv_id"] = adv_id
         n["lib_url"] = (
             ad.get("adLibraryUrl") or
             (f"https://adstransparency.google.com/advertiser/{adv_id}/creative/{cre_id}"
@@ -181,6 +183,7 @@ def normalize_ad(ad, platform):
         n["landing"]= ad.get("landingPageUrl") or ad.get("landing_page_url") or ad.get("clickUrl") or "#"
         ad_id   = ad.get("AD ID") or ad.get("adId") or ad.get("ad_id") or ""
         adv_id  = ad.get("advertiserId") or ad.get("adv_id") or ""
+        n["adv_id"] = adv_id or ad_id
         lib_url = ad.get("Ad Detail URL") or ad.get("adLibraryUrl") or ad.get("ad_library_url") or ""
         n["lib_url"] = (
             lib_url or
@@ -331,12 +334,21 @@ def build_viewer(job_id, brand, platform, country, ads):
     COLOR  = PLATFORMS.get(platform, {}).get("color", "#1A3A5C")
     plabel = PLATFORMS.get(platform, {}).get("label", platform)
 
-    # Count active/inactive
+    # Quality + active counts
     active_count = 0
+    has_media = has_date = has_lib = has_name = 0
     for ad in ads:
         n = normalize_ad(ad, platform)
-        if n.get("status") == "ACTIVE":
-            active_count += 1
+        if n.get("status") == "ACTIVE": active_count += 1
+        if ad.get("_imgs_cdn") or ad.get("_vids_cdn"): has_media += 1
+        if n.get("date"): has_date += 1
+        if n.get("lib_url") and n["lib_url"] != "#": has_lib += 1
+        if n.get("name") and n["name"] != "Unknown": has_name += 1
+    total = len(ads) or 1
+    q_media = round(has_media / total * 100)
+    q_date  = round(has_date  / total * 100)
+    q_lib   = round(has_lib   / total * 100)
+    q_name  = round(has_name  / total * 100)
 
     def card(ad):
         n    = normalize_ad(ad, platform)
@@ -390,14 +402,24 @@ def build_viewer(job_id, brand, platform, country, ads):
         var_badge = (f'<span class="badge hot">🔥 {n["variants"]} variants</span>'
                      if n.get("variants", 0) > 2 else "")
 
-        return f'''<div class="card" data-status="{status}" data-fmt="{fmt}">
+        # Quality check
+        issues = []
+        if not (imgs or vids):         issues.append("no media")
+        if not n.get("date"):          issues.append("no date")
+        if lib_url == "#":             issues.append("no lib link")
+        if n["name"] == "Unknown":     issues.append("unknown advertiser")
+        quality = "ok" if not issues else "warn"
+        qual_badge = (f'<span class="badge qwarn" title="{", ".join(issues)}">⚠ {len(issues)} issue{"s" if len(issues)>1 else ""}</span>'
+                      if issues else '<span class="badge qok">✓ complete</span>')
+
+        return f'''<div class="card" data-status="{status}" data-fmt="{fmt}" data-quality="{quality}">
   <div class="card-header">
     <div class="card-name">{n["name"]}</div>
-    <div class="card-meta">{n["date"]} · {n["plats"]}</div>
+    <div class="card-meta">{n["date"]} · {n["plats"]}{f' · <span style="opacity:.6;font-size:10px">ID:{n["adv_id"]}</span>' if n.get("adv_id") else ""}</div>
     <div class="badge-row">
       <span class="badge {'active' if status=='ACTIVE' else ('inactive' if status=='INACTIVE' else 'unknown')}">{status}</span>
       <span class="badge fmt">{fmt}</span>
-      {imp_badge}{var_badge}
+      {imp_badge}{var_badge}{qual_badge}
     </div>
   </div>
   {media}
@@ -439,6 +461,7 @@ header a:hover{{color:white}}
 .badge.unknown{{background:#e2e3e5;color:#383d41}}
 .badge.fmt{{background:#e2e3e5;color:#383d41}}.badge.hot{{background:#fff3cd;color:#856404}}
 .badge.imp{{background:#cce5ff;color:#004085}}
+.badge.qok{{background:#d4edda;color:#155724}}.badge.qwarn{{background:#fff3cd;color:#856404;cursor:help}}
 .media-wrap{{background:#000;max-height:300px;overflow:hidden}}
 .media-wrap video{{width:100%;max-height:300px;object-fit:contain;display:block}}
 .img-grid{{display:grid;background:#f7f8fa}}
@@ -465,6 +488,9 @@ header a:hover{{color:white}}
   <div class="stats">
     <div class="stat"><strong>{len(ads)}</strong>total</div>
     <div class="stat"><strong>{active_count}</strong>active</div>
+    <div class="stat"><strong>{q_media}%</strong>has media</div>
+    <div class="stat"><strong>{q_name}%</strong>known advertiser</div>
+    <div class="stat"><strong>{q_lib}%</strong>lib link</div>
   </div>
 </header>
 <div class="filters">
@@ -473,12 +499,13 @@ header a:hover{{color:white}}
   <button class="fbtn" onclick="filter('INACTIVE',this)">Inactive</button>
   <button class="fbtn" onclick="filter('VIDEO',this)">📹 Video</button>
   <button class="fbtn" onclick="filter('IMAGE',this)">🖼 Image</button>
+  <button class="fbtn" onclick="filter('warn',this)">⚠ Issues</button>
   <span class="fcount" id="fc">{len(ads)} ads</span>
 </div>
 <div class="grid" id="grid">{cards}</div>
 <div id="lb" onclick="this.classList.remove('open')"><img id="lbi" src=""></div>
 <script>
-function filter(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');let n=0;document.querySelectorAll('.card').forEach(c=>{{let s=f==='all'||(f==='ACTIVE'&&c.dataset.status==='ACTIVE')||(f==='INACTIVE'&&c.dataset.status==='INACTIVE')||(f==='VIDEO'&&c.dataset.fmt==='VIDEO')||(f==='IMAGE'&&c.dataset.fmt==='IMAGE');c.style.display=s?'':'none';if(s)n++}});document.getElementById('fc').textContent=n+' ads'}}
+function filter(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');let n=0;document.querySelectorAll('.card').forEach(c=>{{let s=f==='all'||(f==='ACTIVE'&&c.dataset.status==='ACTIVE')||(f==='INACTIVE'&&c.dataset.status==='INACTIVE')||(f==='VIDEO'&&c.dataset.fmt==='VIDEO')||(f==='IMAGE'&&c.dataset.fmt==='IMAGE')||(f==='warn'&&c.dataset.quality==='warn');c.style.display=s?'':'none';if(s)n++}});document.getElementById('fc').textContent=n+' ads'}}
 function openFull(s){{document.getElementById('lbi').src=s;document.getElementById('lb').classList.add('open')}}
 document.querySelectorAll('.ad-copy').forEach(el=>{{if(el.scrollHeight>el.clientHeight+5){{const t=document.createElement('span');t.className='toggle-copy';t.textContent='Read more ▼';t.onclick=()=>{{el.classList.toggle('open');t.textContent=el.classList.contains('open')?'Show less ▲':'Read more ▼'}};el.after(t)}}}})</script>
 </body></html>"""
