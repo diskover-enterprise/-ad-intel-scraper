@@ -412,7 +412,8 @@ def build_viewer(job_id, brand, platform, country, ads):
         qual_badge = (f'<span class="badge qwarn" title="{", ".join(issues)}">⚠ {len(issues)} issue{"s" if len(issues)>1 else ""}</span>'
                       if issues else '<span class="badge qok">✓ complete</span>')
 
-        return f'''<div class="card" data-status="{status}" data-fmt="{fmt}" data-quality="{quality}">
+        adv_slug = (n["name"] or "Unknown").replace('"',"'")
+        return f'''<div class="card" data-status="{status}" data-fmt="{fmt}" data-quality="{quality}" data-advertiser="{adv_slug}">
   <div class="card-header">
     <div class="card-name">{n["name"]}</div>
     <div class="card-meta">{n["date"]} · {n["plats"]}{f' · <span style="opacity:.6;font-size:10px">ID:{n["adv_id"]}</span>' if n.get("adv_id") else ""}</div>
@@ -476,6 +477,7 @@ header a:hover{{color:white}}
 .cta-pill{{background:{COLOR};color:white;font-size:10px;font-weight:bold;padding:2px 8px;border-radius:10px;white-space:nowrap}}
 .lp-link{{font-size:11px;color:{COLOR};text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}}
 .lib-link{{font-size:11px;color:#888;text-decoration:none;white-space:nowrap}}
+.adv-group{{padding:0 24px 8px}}.adv-group-header{{display:flex;align-items:center;gap:10px;padding:10px 0 8px;cursor:pointer;border-bottom:2px solid {COLOR};margin-bottom:12px}}.adv-group-header h3{{font-size:14px;font-weight:bold;color:#333;flex:1}}.adv-group-header .adv-count{{background:{COLOR};color:white;font-size:11px;font-weight:bold;padding:2px 8px;border-radius:10px}}.adv-group-header .adv-toggle{{font-size:12px;color:#888}}.adv-group-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-bottom:16px}}
 #lb{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:999;align-items:center;justify-content:center;cursor:zoom-out}}
 #lb.open{{display:flex}}#lb img{{max-width:92vw;max-height:92vh;border-radius:8px}}
 </style></head><body>
@@ -500,6 +502,7 @@ header a:hover{{color:white}}
   <button class="fbtn" onclick="filter('VIDEO',this)">📹 Video</button>
   <button class="fbtn" onclick="filter('IMAGE',this)">🖼 Image</button>
   <button class="fbtn" onclick="filter('warn',this)">⚠ Issues</button>
+  <button class="fbtn" id="gbtn" onclick="toggleGroup(this)" style="margin-left:auto">⊞ Group by advertiser</button>
   <span class="fcount" id="fc">{len(ads)} ads</span>
 </div>
 <div class="grid" id="grid">{cards}</div>
@@ -507,6 +510,34 @@ header a:hover{{color:white}}
 <script>
 function filter(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');let n=0;document.querySelectorAll('.card').forEach(c=>{{let s=f==='all'||(f==='ACTIVE'&&c.dataset.status==='ACTIVE')||(f==='INACTIVE'&&c.dataset.status==='INACTIVE')||(f==='VIDEO'&&c.dataset.fmt==='VIDEO')||(f==='IMAGE'&&c.dataset.fmt==='IMAGE')||(f==='warn'&&c.dataset.quality==='warn');c.style.display=s?'':'none';if(s)n++}});document.getElementById('fc').textContent=n+' ads'}}
 function openFull(s){{document.getElementById('lbi').src=s;document.getElementById('lb').classList.add('open')}}
+let grouped=false;
+function toggleGroup(btn){{
+  grouped=!grouped;
+  btn.classList.toggle('on',grouped);
+  btn.textContent=grouped?'⊟ Ungroup':'⊞ Group by advertiser';
+  const grid=document.getElementById('grid');
+  const cards=[...grid.querySelectorAll('.card')];
+  if(grouped){{
+    const map={{}};
+    cards.forEach(c=>{{const a=c.dataset.advertiser||'Unknown';(map[a]=map[a]||[]).push(c)}});
+    const sorted=Object.entries(map).sort((a,b)=>b[1].length-a[1].length);
+    grid.innerHTML='';
+    grid.style.display='block';
+    sorted.forEach(([name,cs])=>{{
+      const g=document.createElement('div');g.className='adv-group';
+      g.innerHTML=`<div class="adv-group-header" onclick="this.nextSibling.style.display=this.nextSibling.style.display==='none'?'grid':'none';this.querySelector('.adv-toggle').textContent=this.nextSibling.style.display==='none'?'▶ show':'▼ hide'"><h3>${{name}}</h3><span class="adv-count">${{cs.length}} ad${{cs.length>1?'s':''}}</span><span class="adv-toggle">▼ hide</span></div><div class="adv-group-grid"></div>`;
+      cs.forEach(c=>g.querySelector('.adv-group-grid').appendChild(c));
+      grid.appendChild(g);
+    }});
+    document.getElementById('fc').textContent=sorted.length+' advertisers';
+  }} else {{
+    const cs=[...grid.querySelectorAll('.card')];
+    grid.innerHTML='';
+    grid.style.display='';
+    cs.forEach(c=>grid.appendChild(c));
+    document.getElementById('fc').textContent=cs.length+' ads';
+  }}
+}}
 document.querySelectorAll('.ad-copy').forEach(el=>{{if(el.scrollHeight>el.clientHeight+5){{const t=document.createElement('span');t.className='toggle-copy';t.textContent='Read more ▼';t.onclick=()=>{{el.classList.toggle('open');t.textContent=el.classList.contains('open')?'Show less ▲':'Read more ▼'}};el.after(t)}}}})</script>
 </body></html>"""
 
