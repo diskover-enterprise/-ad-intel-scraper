@@ -44,7 +44,7 @@ def api_get(path):
 
 def wait_for_run(run_id, log):
     status = "UNKNOWN"
-    for _ in range(80):
+    for _ in range(36):
         time.sleep(5)
         s      = api_get(f"actor-runs/{run_id}")
         status = s["data"]["status"]
@@ -228,18 +228,24 @@ def run_job(job_id, platform, brand, country, searches, domain):
     # ── Meta ──────────────────────────────────────────────────────────────────
     if platform == "meta":
         actor = PLATFORMS["meta"]["actor"]
-        for i, queries in enumerate(searches):
+        results = [[] for _ in searches]
+
+        def run_meta(i, queries):
             log(f"🔍 Search {i+1}/{len(searches)}: {queries}")
             try:
                 run    = api_post(f"acts/{actor}/runs",
-                                  {"searchQueries": queries, "country": country, "maxAds": 60})
+                                  {"searchQueries": queries, "country": country, "maxAds": 30})
                 run_id = run["data"]["id"]
-                log(f"   Run started...")
-                ads = wait_for_run(run_id, log)
-                log(f"   ✓ {len(ads)} ads found")
-                all_ads.extend(ads)
+                ads    = wait_for_run(run_id, log)
+                log(f"   ✓ {len(ads)} ads for search {i+1}")
+                results[i] = ads
             except Exception as e:
-                log(f"   ✗ Error: {e}")
+                log(f"   ✗ Error search {i+1}: {e}")
+
+        threads = [threading.Thread(target=run_meta, args=(i, q)) for i, q in enumerate(searches)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        for r in results: all_ads.extend(r)
 
     # ── Google ────────────────────────────────────────────────────────────────
     elif platform == "google":
@@ -269,15 +275,15 @@ def run_job(job_id, platform, brand, country, searches, domain):
         # data_xplorer actor supports "all" or any country code globally
         tiktok_region = country if country else "all"
         keywords = [q for queries in searches for q in queries]
-        keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:3]
+        keywords = list(dict.fromkeys(kw for kw in keywords if kw))[:1]
         log(f"🔍 TikTok Ad Library: query={keywords} region={tiktok_region}")
         for kw in keywords:
             payload = {
                 "query":        kw,
                 "queryType":    "1",        # 1=keyword, 2=advertiser name/ID
                 "region":       tiktok_region,
-                "maxAds":       50,
-                "fetchDetails": True,
+                "maxAds":       20,
+                "fetchDetails": False,
                 "proxyConfiguration": {"useApifyProxy": True},
             }
             try:
