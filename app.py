@@ -214,9 +214,15 @@ def normalize_ad(ad, platform):
             n["status"] = "ACTIVE"
         n["date"]   = f"{first[:10]} – {last[:10]}" if first and last else first[:10] if first else ""
         n["body"]   = ad.get("adText") or ad.get("ad_text") or ad.get("description") or ""
-        n["title"]  = ad.get("adTitle") or ad.get("ad_title") or n["name"]
-        n["cta"]    = ad.get("callToAction") or ad.get("call_to_action") or ""
-        n["landing"]= ad.get("landingPageUrl") or ad.get("landing_page_url") or ad.get("clickUrl") or "#"
+        n["title"]  = ad.get("Ad Title") or ad.get("adTitle") or ad.get("ad_title") or n["name"]
+        # CTA and landing URL live inside Ad Details array
+        cta_val, landing_val = "", ""
+        for item in (ad.get("Ad Details") or []):
+            if not isinstance(item, dict): continue
+            cta_val     = cta_val     or item.get("Call To Action", "")
+            landing_val = landing_val or item.get("External URL", "")
+        n["cta"]    = cta_val or ad.get("callToAction") or ""
+        n["landing"]= landing_val or ad.get("landingPageUrl") or ad.get("clickUrl") or "#"
         ad_id   = ad.get("AD ID") or ad.get("adId") or ad.get("ad_id") or ""
         adv_id  = ad.get("advertiserId") or ad.get("adv_id") or ""
         n["adv_id"] = adv_id or ad_id
@@ -230,7 +236,8 @@ def normalize_ad(ad, platform):
         n["plats"]  = "TikTok"
         n["variants"] = 0
         # Audience: "100K-200K" string or impressions dict
-        audience = ad.get("Ad Audience") or ""
+        aud_raw = ad.get("Ad Audience") or ""
+        audience = aud_raw.get("raw", "") if isinstance(aud_raw, dict) else str(aud_raw)
         imp = ad.get("impressions") or {}
         if audience:
             n["impressions"] = audience
@@ -319,7 +326,7 @@ def run_job(job_id, platform, brand, country, searches, domain):
                 "queryType":    "1",        # 1=keyword, 2=advertiser name/ID
                 "region":       tiktok_region,
                 "maxAds":       20,
-                "fetchDetails": False,
+                "fetchDetails": True,
                 "proxyConfiguration": {"useApifyProxy": True},
             }
             try:
