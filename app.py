@@ -63,25 +63,61 @@ def extract_urls(ad, platform):
 
     if platform == "meta":
         snap = ad.get("snapshot") or {}
+
+        # top-level arrays
         for u in (ad.get("imageUrls") or []):
-            if u: imgs.append(u)
-        for u in (ad.get("videoUrls") or []):
-            if u: vids.append(u)
-        for obj in list(snap.get("images") or []) + list(snap.get("cards") or []):
-            u = obj.get("resizedImageUrl") or obj.get("originalImageUrl")
             if u and u not in imgs: imgs.append(u)
-        for obj in (snap.get("videos") or []):
-            u = obj.get("videoUrl") or obj.get("videoHdUrl")
+        for u in (ad.get("videoUrls") or []):
             if u and u not in vids: vids.append(u)
 
+        # snapshot.images / snapshot.cards
+        for obj in list(snap.get("images") or []) + list(snap.get("cards") or []):
+            if not isinstance(obj, dict): continue
+            u = (obj.get("resizedImageUrl") or obj.get("originalImageUrl")
+                 or obj.get("image_url") or obj.get("uri"))
+            if u and u not in imgs: imgs.append(u)
+
+        # snapshot.videos
+        for obj in (snap.get("videos") or []):
+            if not isinstance(obj, dict): continue
+            u = (obj.get("videoUrl") or obj.get("videoHdUrl")
+                 or obj.get("video_hd_url") or obj.get("video_sd_url"))
+            c = obj.get("thumbnailUrl") or obj.get("thumbnail")
+            if u and u not in vids: vids.append(u)
+            if c and c not in imgs: imgs.append(c)
+
+        # snapshot.body image/video
+        body = snap.get("body") or {}
+        bi = body.get("image") or {}
+        bv = body.get("video") or {}
+        if isinstance(bi, dict):
+            u = bi.get("uri") or bi.get("url")
+            if u and u not in imgs: imgs.append(u)
+        if isinstance(bv, dict):
+            u = bv.get("video_hd_url") or bv.get("video_sd_url") or bv.get("uri")
+            if u and u not in vids: vids.append(u)
+
+        # fallback: advertiser profile picture
+        profile_pic = ad.get("pageProfilePictureUrl")
+        if profile_pic and not imgs and profile_pic not in imgs:
+            imgs.append(profile_pic)
+
     elif platform == "google":
-        for v in (ad.get("variations") or []):
-            img = v.get("imageUrl")
-            vid = v.get("videoUrl")
-            if img and img not in imgs: imgs.append(img)
-            if vid and vid not in vids: vids.append(vid)
+        # top-level fields from automation-lab actor
+        img = ad.get("imageUrl")
+        if img and img not in imgs: imgs.append(img)
+        # previewUrl is a JS embed for video ads — store separately
         preview = ad.get("previewUrl")
-        if preview and preview not in imgs: imgs.append(preview)
+        if preview and ad.get("adFormat") == "Video":
+            ad["_preview_embed"] = preview
+        elif preview and not img:
+            imgs.append(preview)  # use as image fallback for non-video
+        # fallback: check variations array
+        for v in (ad.get("variations") or []):
+            i = v.get("imageUrl")
+            v2 = v.get("videoUrl")
+            if i and i not in imgs: imgs.append(i)
+            if v2 and v2 not in vids: vids.append(v2)
 
     elif platform == "tiktok":
         # data_xplorer: "Ad Media" = ["Video 1: url", "Cover 1: url", "Image 1: url"]
@@ -377,7 +413,13 @@ def build_viewer(job_id, brand, platform, country, ads):
         status  = n["status"]
         lib_url = n["lib_url"] or "#"
 
-        if vids:
+        embed = ad.get("_preview_embed")
+        if embed:
+            media = (f'<div class="media-wrap" style="background:#000;min-height:200px">'
+                     f'<iframe src="{embed}" style="width:100%;height:300px;border:none" '
+                     f'allowfullscreen sandbox="allow-scripts allow-same-origin"></iframe>'
+                     f'</div>')
+        elif vids:
             media = (f'<div class="media-wrap">'
                      f'<video controls preload="metadata" src="{vids[0]}" crossorigin="anonymous"></video>'
                      f'</div>')
@@ -439,7 +481,7 @@ def build_viewer(job_id, brand, platform, country, ads):
     <a href="{lp}" target="_blank" class="lp-link">{lp_host}</a>
     <a href="{lib_url}" target="_blank" class="lib-link">Ad Library ↗</a>
     {f'<button class="save-btn" onclick="dlVideo(this)" data-src="{vids[0]}">⬇ video</button>' if vids else ""}
-    {f'<button class="save-btn" onclick="shotCard(this)">📷 shot</button>' if imgs else ""}
+    <button class="save-btn" onclick="shotCard(this)">📷 shot</button>
   </div>
 </div>'''
 
