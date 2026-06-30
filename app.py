@@ -438,6 +438,8 @@ def build_viewer(job_id, brand, platform, country, ads):
     <span class="cta-pill">{cta}</span>
     <a href="{lp}" target="_blank" class="lp-link">{lp_host}</a>
     <a href="{lib_url}" target="_blank" class="lib-link">Ad Library ↗</a>
+    {f'<button class="save-btn" onclick="dlVideo(this)" data-src="{vids[0]}">⬇ video</button>' if vids else ""}
+    {f'<button class="save-btn" onclick="shotCard(this)">📷 shot</button>' if imgs else ""}
   </div>
 </div>'''
 
@@ -483,6 +485,7 @@ header a:hover{{color:white}}
 .cta-pill{{background:{COLOR};color:white;font-size:10px;font-weight:bold;padding:2px 8px;border-radius:10px;white-space:nowrap}}
 .lp-link{{font-size:11px;color:{COLOR};text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}}
 .lib-link{{font-size:11px;color:#888;text-decoration:none;white-space:nowrap}}
+.save-btn{{font-size:11px;color:#888;background:#f0f2f5;border:1px solid #ddd;border-radius:6px;padding:2px 7px;cursor:pointer;white-space:nowrap;text-decoration:none}}.save-btn:hover{{background:#e0e2e5}}
 .adv-group{{padding:0 24px 8px}}.adv-group-header{{display:flex;align-items:center;gap:10px;padding:10px 0 8px;cursor:pointer;border-bottom:2px solid {COLOR};margin-bottom:12px}}.adv-group-header h3{{font-size:14px;font-weight:bold;color:#333;flex:1}}.adv-group-header .adv-count{{background:{COLOR};color:white;font-size:11px;font-weight:bold;padding:2px 8px;border-radius:10px}}.adv-group-header .adv-toggle{{font-size:12px;color:#888}}.adv-group-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;margin-bottom:16px}}
 #lb{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:999;align-items:center;justify-content:center;cursor:zoom-out}}
 #lb.open{{display:flex}}#lb img{{max-width:92vw;max-height:92vh;border-radius:8px}}
@@ -545,6 +548,27 @@ function toggleGroup(btn){{
   }}
 }}
 document.querySelectorAll('.ad-copy').forEach(el=>{{if(el.scrollHeight>el.clientHeight+5){{const t=document.createElement('span');t.className='toggle-copy';t.textContent='Read more ▼';t.onclick=()=>{{el.classList.toggle('open');t.textContent=el.classList.contains('open')?'Show less ▲':'Read more ▼'}};el.after(t)}}}})</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script>
+function shotCard(btn){{
+  const card=btn.closest('.card');
+  html2canvas(card,{{useCORS:true,allowTaint:true,scale:2}}).then(canvas=>{{
+    const a=document.createElement('a');
+    a.href=canvas.toDataURL('image/png');
+    a.download='ad-screenshot.png';
+    a.click();
+  }}).catch(()=>alert('Screenshot failed — try right-click → Save image on the ad directly.'));
+}}
+function dlVideo(btn){{
+  const url=btn.dataset.src;
+  fetch(url).then(r=>r.blob()).then(blob=>{{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='ad-video.mp4';
+    a.click();
+  }}).catch(()=>{{window.open(url,'_blank')}});
+}}
+</script>
 </body></html>"""
 
 
